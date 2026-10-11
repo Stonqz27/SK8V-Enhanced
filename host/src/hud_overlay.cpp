@@ -24,6 +24,7 @@
 #endif
 #include "natives.h"
 #include "skatev_runtime.h"
+#include "thread_census.h"
 
 namespace hudoverlay {
 namespace {
@@ -49,6 +50,7 @@ struct Shared {
     std::uint32_t(__cdecl* showRadio)(void*, const char*, const char*, const char*, const char*) = nullptr;
     bool enabled = false;
     bool registered = false;
+    bool trickAnalyzer = true; // viewport flag bit 1 (script thread)
     float maxAspect = 0.0f;
     float safeOverride = -1.0f;
     // Script thread only.
@@ -71,6 +73,28 @@ template <class... A>
 void Logf(const char* fmt, A... a) {
     util::Logf(g.log, fmt, a...);
 }
+
+std::atomic<long long> g_presentTicks{0}, g_presentMaxTicks{0};
+std::atomic<unsigned> g_presents{0};
+
+// Measure the actual rendering path in either edition, including early returns.
+struct PresentTimer {
+    LARGE_INTEGER start{};
+    PresentTimer() {
+        static const bool named = (threadcensus::Name(L"gta-render (presents)"), true);
+        (void)named;
+        QueryPerformanceCounter(&start);
+    }
+    ~PresentTimer() {
+        LARGE_INTEGER end{};
+        QueryPerformanceCounter(&end);
+        const long long ticks = end.QuadPart - start.QuadPart;
+        g_presentTicks += ticks;
+        ++g_presents;
+        long long max = g_presentMaxTicks.load();
+        while (ticks > max && !g_presentMaxTicks.compare_exchange_weak(max, ticks)) {}
+    }
+};
 
 void ReadPublication(IDXGISwapChain* sc,hudrender::Frame& frame,xrayrender::Frame& xray) {
     stall::RegisterRender();
@@ -104,6 +128,7 @@ void ReadPublication(IDXGISwapChain* sc,hudrender::Frame& frame,xrayrender::Fram
     }
 }
 void OnPresent(void* raw) {
+    PresentTimer timer;
     auto* sc=static_cast<IDXGISwapChain*>(raw);
     static hudrender::Frame frame;static xrayrender::Frame xray;
     ReadPublication(sc,frame,xray);
@@ -145,6 +170,15 @@ void FetchTextures(std::uint32_t count, std::uint32_t generation) {
     Logf("SkateV HUD: %u textures fetched (generation %u)", count, generation);
 }
 } // namespace
+
+PresentStats TakePresentStats() {
+    static const double perMs = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return static_cast<double>(f.QuadPart) / 1000.0; }();
+    PresentStats r;
+    r.totalMs = static_cast<double>(g_presentTicks.exchange(0)) / perMs;
+    r.maxMs = static_cast<double>(g_presentMaxTicks.exchange(0)) / perMs;
+    r.count = g_presents.exchange(0);
+    return r;
+}
 
 void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
     g.log = log;
@@ -191,6 +225,8 @@ bool ShowRadio(const char* top, const char* middle, const char* bottom, const ch
     return g.enabled && g.runtime && g.showRadio && g.showRadio(g.runtime, top, middle, bottom, station) == 1;
 }
 
+void SetTrickAnalyzer(bool on) { g.trickAnalyzer = on; }
+
 void Tick(bool skating) {
     if (!g.enabled) return;
     const UINT w = g.backbufferWidth.load(), h = g.backbufferHeight.load();
@@ -203,7 +239,7 @@ void Tick(bool skating) {
         v.height = h;
         v.safe_zone = safe;
         v.max_aspect = g.maxAspect;
-        v.flags = 1;
+        v.flags = 1u | (g.trickAnalyzer ? 2u : 0u);
         if (g.safeOverride < 0.5f) {
             // GTA's own HUD inset (safe zone plus its ultrawide placement, where the minimap is): a
             // top-left aligned origin, mirrored (the area is centred). Never less than the safe zone.
@@ -329,6 +365,7 @@ void EnhancedPresent(void* raw,void* queue) {
     if(pid!=GetCurrentProcessId()||desc.BufferDesc.Width<640||desc.BufferDesc.Height<360)return;
     if(g_swapOwner&&g_swapOwner!=raw)return;
     g_swapOwner=raw;
+    PresentTimer timer;
     static hudrender::Frame frame;static xrayrender::Frame xray;
     ReadPublication(sc,frame,xray);
     if(g.enabled)g_bridge.Present(sc,static_cast<ID3D12CommandQueue*>(queue),frame,xray);

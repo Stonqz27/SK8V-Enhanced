@@ -29,7 +29,7 @@ impl MoviePlayer {
             vm.set(vm.global, name, Value::Object(object))?;
         }
         vm.set(vm.global, "Screen_EdgeOffset", Value::Number(0.0))?;
-        let mut bindings = Bindings { movie: Movie::load(assets.source())?, data: HomData::default() };
+        let mut bindings = Bindings { movie: Movie::load(assets.source())?, data: HomData::default(), gesture: String::new(), mirrored: false };
         let initial: Vec<_> = bindings
             .movie
             .characters

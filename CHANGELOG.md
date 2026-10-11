@@ -1,5 +1,15 @@
 # Changelog
 
+## SK8V 1.1.8 Enhanced source update, 2026-10-11
+
+- Merge upstream 1.1.0 through 1.1.8 (9fbef44), retaining upstream history and all Enhanced compatibility adaptations.
+- Adopt incremental collision building, cached dynamic-world lookups, controller/HID support and the long-uptime controller/snow/shooting fixes.
+- Add gestures, posture/style/equipment settings, Trick Analyzer support and smoother wheel spin.
+- Measure HUD frame cost on the Enhanced D3D12 dispatch rather than the unused Legacy callback.
+- Exclude the new D3D11 snow-stencil detour and Legacy-only wheel-track texture registrar from Enhanced.
+- Add Enhanced nearby-streaming and stencil-exclusion regression checks; allow the runtime smoke harness to test a new DLL without replacing the fixture installation.
+- Document matching host/runtime deployment and owned-data preparation changes. New 1.1.8 live play testing and a portable installer remain pending.
+
 ## Enhanced compatibility port — initial source publication, 2026-10-11
 
 - Adapt SK8V 1.0.9 to Enhanced 1.0.1158.16: animation jobs, live collision layout, larger protagonist skeletons and native board.

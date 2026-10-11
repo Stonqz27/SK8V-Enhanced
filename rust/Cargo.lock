@@ -2738,6 +2738,7 @@ version = "0.2.0"
 dependencies = [
  "bevy_math",
  "png",
+ "rustc-hash",
  "serde_json",
  "skate-aems",
  "skate-core",
@@ -2844,6 +2845,7 @@ checksum = "0193cc4331cfd2f3d2011ef287590868599a2f33c3e69bc22c1a3d3acf9e02fb"
 name = "svwc"
 version = "0.3.0"
 dependencies = [
+ "rustc-hash",
  "zstd",
 ]
 

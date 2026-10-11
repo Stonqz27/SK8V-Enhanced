@@ -5,4 +5,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
+rustc-hash = "1.1"
 zstd = "0.13"

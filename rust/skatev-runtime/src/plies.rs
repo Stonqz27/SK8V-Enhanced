@@ -11,7 +11,7 @@
 //! riser touches its own top at the edge (gap 0), so it is never removed.
 use crate::grid::{height, XyGrid};
 use bevy_math::Vec3;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Deepest a face may sit under a walkable skin and still be interior.
 const SKIN: f32 = 0.12;
@@ -26,6 +26,12 @@ const STEP: f32 = 0.25;
 /// Indices of interior faces among `tris` (GTA space, Z up). `grid`: `tris`
 /// in `curbs::CELL` cells.
 pub fn interior(tris: &[[Vec3; 3]], grid: &XyGrid) -> Vec<usize> {
+    interior_reusing(tris, grid, |_, _| None)
+}
+
+/// As `interior`; `kept(i, pad)` is triangle `i`'s answer from the last
+/// build when nothing within `pad` of it changed (`reuse::Dirty`).
+pub fn interior_reusing(tris: &[[Vec3; 3]], grid: &XyGrid, kept: impl Fn(usize, f32) -> Option<bool>) -> Vec<usize> {
     let walkable: Vec<bool> = tris
         .iter()
         .map(|t| {
@@ -52,6 +58,13 @@ pub fn interior(tris: &[[Vec3; 3]], grid: &XyGrid) -> Vec<usize> {
         // A long road never lies in a ply interior; skip it cheaply. (Height
         // is no filter: a ply runs up a ramp.)
         if (hi - lo).truncate().length() > 8.0 {
+            continue;
+        }
+        // Only the faces over its own samples count.
+        if let Some(was) = kept(i, 0.1) {
+            if was {
+                out.push(i);
+            }
             continue;
         }
         let centroid = (t[0] + t[1] + t[2]) / 3.0;
@@ -98,9 +111,14 @@ const CAP_DEPTH: f32 = 0.08;
 /// are joined by a rim only as deep as the plate, so plates and sheets keep
 /// their faces.
 pub fn abutting_caps(tris: &[[Vec3; 3]]) -> Vec<usize> {
+    abutting_caps_reusing(tris, |_, _| None)
+}
+
+/// As `abutting_caps`, with `kept` as for `interior_reusing`.
+pub fn abutting_caps_reusing(tris: &[[Vec3; 3]], kept: impl Fn(usize, f32) -> Option<bool>) -> Vec<usize> {
     const CAP_CELL: f32 = 0.5;
     let key = |p: Vec3| ((p.x / CAP_CELL).floor() as i32, (p.y / CAP_CELL).floor() as i32, (p.z / CAP_CELL).floor() as i32);
-    let mut small: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+    let mut small: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::default();
     let mut normals = vec![Vec3::ZERO; tris.len()];
     for (i, t) in tris.iter().enumerate() {
         let longest = (0..3).map(|e| (t[(e + 1) % 3] - t[e]).length()).fold(0.0, f32::max);
@@ -127,34 +145,71 @@ pub fn abutting_caps(tris: &[[Vec3; 3]]) -> Vec<usize> {
     let near_plane = |a: usize, b: usize| {
         tris[a].iter().all(|&p| (p - tris[b][0]).dot(normals[b]).abs() <= CAP_GAP)
     };
-    // Edge adjacency over positions welded at 1 mm.
+    // Edge adjacency over positions welded at 1 mm, for the small faces'
+    // edges only: per edge, the faces on it threaded through `on`. Welded
+    // positions are numbered first, so an edge is two ids in one u64.
     let weld = |p: Vec3| [(p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64, (p.z * 1000.0).round() as i64];
-    let mut edges: HashMap<([i64; 3], [i64; 3]), Vec<u32>> = HashMap::new();
-    for (i, t) in tris.iter().enumerate() {
+    let mut ids: HashMap<[i64; 3], u32> = HashMap::default();
+    let corners: Vec<[u32; 3]> = tris
+        .iter()
+        .map(|t| {
+            t.map(|p| {
+                let next = ids.len() as u32;
+                *ids.entry(weld(p)).or_insert(next)
+            })
+        })
+        .collect();
+    let edge = |i: usize, e: usize| {
+        let (a, b) = (corners[i][e] as u64, corners[i][(e + 1) % 3] as u64);
+        a.min(b) << 32 | a.max(b)
+    };
+    let mut slot: HashMap<u64, u32> = HashMap::default();
+    for &i in small.values().flatten() {
         for e in 0..3 {
-            let (a, b) = (weld(t[e]), weld(t[(e + 1) % 3]));
-            edges.entry(if a < b { (a, b) } else { (b, a) }).or_default().push(i as u32);
+            let n = slot.len() as u32;
+            slot.entry(edge(i as usize, e)).or_insert(n);
         }
     }
-    // How far the faces sharing an edge with `i` reach behind it.
-    let depth = |i: usize| {
+    let mut head = vec![u32::MAX; slot.len()];
+    let mut on: Vec<(u32, u32)> = Vec::new(); // (face, next)
+    for i in 0..tris.len() {
+        for e in 0..3 {
+            if let Some(&k) = slot.get(&edge(i, e)) {
+                on.push((i as u32, head[k as usize]));
+                head[k as usize] = on.len() as u32 - 1;
+            }
+        }
+    }
+    // How far the faces sharing an edge with small face `i` reach behind it.
+    let mut depth = vec![0.0f32; tris.len()];
+    for &i in small.values().flatten() {
+        let i = i as usize;
         let mut deepest = 0.0f32;
         for e in 0..3 {
-            let (a, b) = (weld(tris[i][e]), weld(tris[i][(e + 1) % 3]));
-            for &j in &edges[&if a < b { (a, b) } else { (b, a) }] {
+            let mut at = head[slot[&edge(i, e)] as usize];
+            while at != u32::MAX {
+                let (j, next) = on[at as usize];
                 if j as usize != i {
                     for &v in &tris[j as usize] {
                         deepest = deepest.max(-(v - tris[i][0]).dot(normals[i]));
                     }
                 }
+                at = next;
             }
         }
-        deepest
-    };
+        depth[i] = deepest;
+    }
+    let depth = |i: usize| depth[i];
     let mut found = vec![false; tris.len()];
     for (&(x, y, z), list) in &small {
         for &i in list {
             let i = i as usize;
+            // Partners sit in the neighbouring cells, their boxes behind
+            // them: nothing past 2.5 m is read.
+            if let Some(was) = kept(i, 2.5) {
+                found[i] = was;
+                continue;
+            }
             if depth(i) <= CAP_DEPTH {
                 continue;
             }
@@ -214,15 +269,25 @@ const BURIED_DEPTH: f32 = 0.005;
 /// within `REACH` of its top plus `BURIED_SHARE` of all its samples lie
 /// inside it within `BURIED_TOL`.
 pub fn buried_faces(tris: &[[Vec3; 3]]) -> Vec<usize> {
+    buried_faces_reusing(tris, |_, _| None)
+}
+
+/// As `buried_faces`, with `kept` as for `interior_reusing`.
+pub fn buried_faces_reusing(tris: &[[Vec3; 3]], kept: impl Fn(usize, f32) -> Option<bool>) -> Vec<usize> {
     // Solids: components over welded edges where every edge has two faces.
     let weld = |p: Vec3| [(p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64, (p.z * 1000.0).round() as i64];
-    // (welded edge, face), sorted: the faces of an edge sit together in order.
-    type Edge = ([i64; 3], [i64; 3]);
-    let mut edges: Vec<(Edge, u32)> = Vec::with_capacity(tris.len() * 3);
+    // (welded edge as two welded-vertex ids, face), sorted: the faces of an
+    // edge sit together in order.
+    let mut ids: HashMap<[i64; 3], u32> = HashMap::default();
+    let mut edges: Vec<(u64, u32)> = Vec::with_capacity(tris.len() * 3);
     for (i, t) in tris.iter().enumerate() {
+        let v = t.map(|p| {
+            let next = ids.len() as u32;
+            *ids.entry(weld(p)).or_insert(next)
+        });
         for e in 0..3 {
-            let (a, b) = (weld(t[e]), weld(t[(e + 1) % 3]));
-            edges.push((if a < b { (a, b) } else { (b, a) }, i as u32));
+            let (a, b) = (v[e] as u64, v[(e + 1) % 3] as u64);
+            edges.push((a.min(b) << 32 | a.max(b), i as u32));
         }
     }
     edges.sort_unstable();
@@ -245,13 +310,13 @@ pub fn buried_faces(tris: &[[Vec3; 3]]) -> Vec<usize> {
         }
     }
     let solid_of: Vec<u32> = (0..tris.len() as u32).map(|i| find(&mut root, i)).collect();
-    let mut members: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut members: HashMap<u32, Vec<u32>> = HashMap::default();
     for (i, &r) in solid_of.iter().enumerate() {
         members.entry(r).or_default().push(i as u32);
     }
     // Each solid as its face planes (unit normal, offset), with its bounds.
     let mut solids: Vec<(Vec<(Vec3, f32)>, Vec3, Vec3)> = Vec::new();
-    let mut solid_index: HashMap<u32, usize> = HashMap::new();
+    let mut solid_index: HashMap<u32, usize> = HashMap::default();
     for (&r, list) in &members {
         if list.len() < 4 || list.len() > SOLID_TRIS || list.iter().any(|&f| open[f as usize]) {
             continue;
@@ -287,6 +352,13 @@ pub fn buried_faces(tris: &[[Vec3; 3]]) -> Vec<usize> {
     let mut out = Vec::new();
     for (i, t) in tris.iter().enumerate() {
         let Some(&own) = solid_index.get(&solid_of[i]) else { continue };
+        // Its own solid and those it may be buried in span SOLID_SPAN at most.
+        if let Some(was) = kept(i, SOLID_SPAN + 1.0) {
+            if was {
+                out.push(i);
+            }
+            continue;
+        }
         let centroid = (t[0] + t[1] + t[2]) / 3.0;
         let others: Vec<usize> = grid.at(centroid.x, centroid.y).iter().map(|&s| s as usize)
             .filter(|&s| s != own && outside(centroid, s) <= -BURIED_DEPTH).collect();

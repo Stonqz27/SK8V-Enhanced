@@ -20,7 +20,7 @@ use crate::worker::{Log, Shared};
 use skate_hud::hom::state;
 use skate_hud::layout::{DEFAULT_MAX_ASPECT, Layout};
 use skate_hud::player::Texture;
-use skate_hud::{Assets, ChyronPlayer, Frame, HomPlayer, Player, ScoreInput};
+use skate_hud::{AnalyserPlayer, Assets, ChyronPlayer, Frame, HomPlayer, Player, ScoreInput};
 use std::ffi::c_void;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -36,7 +36,8 @@ pub struct SvHudViewport {
     pub safe_zone: f32,
     /// Widest HUD region aspect; <= 0 uncapped.
     pub max_aspect: f32,
-    /// Bit 0: HUD enabled (the runtime runs the movie only when set).
+    /// Bit 0: HUD enabled (the runtime runs the movie only when set);
+    /// bit 1: the Trick Analyzer.
     pub flags: u32,
     /// GTA's HUD area as the game reports it (normalized x0, y0, x1, y1:
     /// script-graphics alignment, safe zone and ultrawide placement
@@ -205,6 +206,24 @@ struct ChyronMovie {
     shown_at: Option<std::time::Instant>,
 }
 
+/// How long a trick's gesture stays before it fades out.
+const GESTURE_SECONDS: f32 = 3.0;
+
+/// Right stick samples kept for the replay (2 s of Skate ticks).
+const STICK_SAMPLES: usize = 120;
+
+struct AnalyserMovie {
+    assets: Arc<Assets>,
+    texture_base: u32,
+    /// A white texel after the movie's textures (the stick path).
+    white: u32,
+    player: Option<AnalyserPlayer>,
+    shown_at: Option<std::time::Instant>,
+    stick: std::collections::VecDeque<[f32; 2]>,
+    /// The last flick, replayed at Skate's tick rate from `shown_at`.
+    path: Vec<[f32; 2]>,
+}
+
 /// `<dir>/logos/logos.json`: [{"id", "file", "width", "height"}] (RGBA8).
 fn station_logos(dir: &Path) -> Vec<(String, Texture)> {
     let Ok(text) = std::fs::read(dir.join("logos").join("logos.json")) else {
@@ -236,6 +255,7 @@ pub struct Driver {
     failed: bool,
     hom: Option<HomMovie>,
     chyron: Option<ChyronMovie>,
+    analyser: Option<AnalyserMovie>,
 }
 
 impl Driver {
@@ -324,6 +344,29 @@ impl Driver {
                 None
             }
         };
+        let dir = Assets::analyser_dir_for(data_root);
+        let analyser = match Assets::load_analyser(&dir) {
+            Ok(a) => {
+                let texture_base = textures.len() as u32;
+                textures.extend(a.textures.iter().cloned());
+                let white = a.textures.len() as u32;
+                textures.push(Texture { name: "analyser-white".into(), width: 1, height: 1, rgba: vec![255; 4] });
+                log(&format!("Trick Analyzer loaded from {} ({} textures)", dir.display(), a.textures.len()));
+                Some(AnalyserMovie {
+                    assets: Arc::new(a),
+                    texture_base,
+                    white,
+                    player: None,
+                    shown_at: None,
+                    stick: Default::default(),
+                    path: Vec::new(),
+                })
+            }
+            Err(e) => {
+                log(&format!("Trick Analyzer unavailable ({e}); run tools/prepare-hom-hud.py --movie trickanalyser"));
+                None
+            }
+        };
         if !textures.is_empty() {
             let mut s = shared.lock().unwrap();
             s.hud.textures = Arc::new(textures);
@@ -336,6 +379,7 @@ impl Driver {
             failed: false,
             hom,
             chyron,
+            analyser,
         }
     }
 
@@ -393,10 +437,12 @@ impl Driver {
         &mut self,
         s: &skate_host::bridge::Session,
         hom: &crate::hom::Driver,
+        right_stick: [i16; 2],
         shared: &Mutex<Shared>,
         log: &Log,
     ) {
         self.tick_radio(shared, log);
+        self.tick_analyser(s, right_stick, shared, log);
         if let Some(p) = self.player.as_mut() {
             if let Err(e) = p.update(&score_input(&s.hud_input())) {
                 self.fail(&e, log);
@@ -463,6 +509,62 @@ impl Driver {
         }
     }
 
+    /// The Trick Analyzer: each announced trick with a gesture diagram shows
+    /// it with a replay of the player's last flick, until the next one or
+    /// GESTURE_SECONDS; a bail clears it. Made and dropped as the setting
+    /// (viewport bit 1) and GTA's HUD come and go.
+    fn tick_analyser(&mut self, s: &skate_host::bridge::Session, right: [i16; 2], shared: &Mutex<Shared>, log: &Log) {
+        let Some(a) = self.analyser.as_mut() else { return };
+        if a.stick.len() == STICK_SAMPLES {
+            a.stick.pop_front();
+        }
+        a.stick.push_back(right.map(|v| (v as f32 / 32767.0).clamp(-1.0, 1.0)));
+        let on = shared.lock().unwrap().hud.viewport.flags & 3 == 3;
+        if !on {
+            a.player = None;
+            a.shown_at = None;
+            a.path.clear();
+            return;
+        }
+        if a.player.is_none() {
+            match AnalyserPlayer::new(&a.assets) {
+                Ok(p) => a.player = Some(p),
+                Err(e) => {
+                    log(&format!("Trick Analyzer stopped: {e}"));
+                    self.analyser = None;
+                    return;
+                }
+            }
+        }
+        let p = a.player.as_mut().unwrap();
+        let h = s.hud_input();
+        let gesture = if h.new_trick || h.modified_trick {
+            skate_hud::analyser::gesture_for(h.trick_id, h.stance[2])
+        } else {
+            String::new()
+        };
+        let mut run = || -> Result<(), String> {
+            if !gesture.is_empty() {
+                // Natural goofy, switch and fakie each turn the toes the other
+                // way; the converted diagrams come out goofy-handed (a regular
+                // rider's own flick sweeps opposite the unflipped diagram).
+                let mirrored = !((s.natural_stance().0 != 0) ^ h.stance[0] ^ h.stance[1]);
+                p.gesture(&gesture, mirrored)?;
+                a.shown_at = Some(std::time::Instant::now());
+                a.path = skate_hud::analyser::flick(a.stick.make_contiguous());
+            } else if a.shown_at.is_some_and(|t| h.close_tricks || t.elapsed().as_secs_f32() > GESTURE_SECONDS) {
+                a.shown_at = None;
+                a.path.clear();
+                p.gesture("", false)?;
+            }
+            p.advance()
+        };
+        if let Err(e) = run() {
+            log(&format!("Trick Analyzer stopped: {e}"));
+            self.analyser = None;
+        }
+    }
+
     /// Publishes the current scene for the host.
     pub fn publish(&mut self, shared: &Mutex<Shared>, log: &Log) {
         let viewport = shared.lock().unwrap().hud.viewport;
@@ -502,6 +604,21 @@ impl Driver {
                 }
             }
         }
+        let mut analyser_frame = None;
+        if let (Some(a), Some(l)) = (self.analyser.as_ref(), layout) {
+            if let Some(p) = a.player.as_ref() {
+                match p.frame(&a.assets, &l) {
+                    Ok(mut f) => {
+                        // The flick replays at Skate's 60 Hz from when the gesture showed.
+                        let at = a.shown_at.map_or(0.0, |t| t.elapsed().as_secs_f32());
+                        let shown = ((at * 60.0) as usize + 2).min(a.path.len());
+                        skate_hud::analyser::draw_path(&mut f, &l, &a.path[..shown], a.white);
+                        analyser_frame = Some((f, a.texture_base));
+                    }
+                    Err(e) => log(&format!("Trick Analyzer frame: {e}")),
+                }
+            }
+        }
         let mut frame = None;
         if let (Some(p), Some(l), Some(a)) = (self.player.as_mut(), layout, self.assets.as_ref()) {
             if self.layout != Some(l) {
@@ -519,7 +636,7 @@ impl Driver {
                 Err(e) => self.fail(&e, log),
             }
         }
-        for (h, base) in hom_frame.into_iter().chain(chyron_frame) {
+        for (h, base) in hom_frame.into_iter().chain(chyron_frame).chain(analyser_frame) {
             let mut f = frame.unwrap_or_else(|| Frame { layout: h.layout, ..Default::default() });
             append_frame(&mut f, &h, base);
             frame = Some(f);
@@ -543,6 +660,11 @@ impl Driver {
         if let Some(c) = self.chyron.as_mut() {
             c.player = None;
             c.shown_at = None;
+        }
+        if let Some(a) = self.analyser.as_mut() {
+            a.player = None;
+            a.shown_at = None;
+            a.path.clear();
         }
         let mut s = shared.lock().unwrap();
         s.hud.serial += 1;

@@ -39,6 +39,10 @@ constexpr std::size_t kRegistrationBudget=128;
 // registered once rather than on every board take-out.
 std::set<std::string> g_written;
 bool g_started=false, g_type=false, g_failed=false, g_live=false;
+// The limb models finished loading, and the limbs' collision is on: both
+// change only on these transitions, not per frame (each check cost two
+// natives per limb every frame).
+bool g_loaded=false, g_colliding=false;
 int g_ped=0;
 ULONGLONG g_requestedAt=0;
 void (*g_log)(const char*)=nullptr;
@@ -48,14 +52,18 @@ void Remove() {
         if(p.entity && gta::Call<bool>(gta::DOES_ENTITY_EXIST,p.entity)) gta::Call<void>(gta::DELETE_OBJECT,&p.entity);
         p.entity=0;p.bone=-1;
     }
-    g_live=false;g_ped=0;
+    g_live=false;g_ped=0;g_loaded=false;g_colliding=false;
 }
 void Fail(const char* why) { Log(why);Remove();g_failed=true; }
 void Collision(int entity,bool enabled) {
     gta::Call<void>(gta::SET_ENTITY_COLLISION,entity,enabled,false);
     gta::Call<void>(gta::SET_ENTITY_COMPLETELY_DISABLE_COLLISION,entity,enabled,false);
 }
-void Disable() { for(const auto& p:g_parts) if(p.entity) Collision(p.entity,false); }
+void Disable() {
+    if(!g_colliding) return;
+    for(const auto& p:g_parts) if(p.entity) Collision(p.entity,false);
+    g_colliding=false;
+}
 }
 
 bool Start(const std::wstring& ini,const std::wstring& dataRoot,void (*log)(const char*)) {
@@ -178,17 +186,20 @@ void Tick(int ped,const float* boneWorld,std::uint32_t count,int ignoreVehicle) 
         g_type=true;g_requestedAt=GetTickCount64();
         Log("posed NPC collision: generated limb resources requested");
     }
-    bool loaded=true;
-    for(const auto& p:g_parts) {
-        if(!gta::Call<bool>(gta::IS_MODEL_VALID,p.hash)||!gta::Call<bool>(gta::HAS_MODEL_LOADED,p.hash)) {
-            if(gta::Call<bool>(gta::IS_MODEL_VALID,p.hash)) gta::Call<void>(gta::REQUEST_MODEL,p.hash);
-            loaded=false;
+    if(!g_loaded) {
+        bool loaded=true;
+        for(const auto& p:g_parts) {
+            if(!gta::Call<bool>(gta::IS_MODEL_VALID,p.hash)||!gta::Call<bool>(gta::HAS_MODEL_LOADED,p.hash)) {
+                if(gta::Call<bool>(gta::IS_MODEL_VALID,p.hash)) gta::Call<void>(gta::REQUEST_MODEL,p.hash);
+                loaded=false;
+            }
         }
-    }
-    if(!loaded) {
-        if(!g_requestedAt) g_requestedAt=GetTickCount64();
-        if(GetTickCount64()-g_requestedAt>15000) Fail("posed NPC collision: model loading timed out");
-        return;
+        if(!loaded) {
+            if(!g_requestedAt) g_requestedAt=GetTickCount64();
+            if(GetTickCount64()-g_requestedAt>15000) Fail("posed NPC collision: model loading timed out");
+            return;
+        }
+        g_loaded=true;
     }
     for(std::size_t i=0;i<g_parts.size();++i) {
         auto& p=g_parts[i];const auto* m=boneWorld+16*p.bone;const auto& q=quaternions[i];
@@ -217,7 +228,10 @@ void Tick(int ped,const float* boneWorld,std::uint32_t count,int ignoreVehicle) 
         }
     }
     // All shapes have valid poses before any shape can contact an NPC.
-    for(const auto& p:g_parts) Collision(p.entity,true);
+    if(!g_colliding) {
+        for(const auto& p:g_parts) Collision(p.entity,true);
+        g_colliding=true;
+    }
     if(!g_live) {
         char line[160];std::snprintf(line,sizeof(line),"posed NPC collision: %zu native kinematic limb instances active; GTA contact verification pending",g_parts.size());
         Log(line);g_live=true;

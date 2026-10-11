@@ -17,7 +17,7 @@
 // Port keeps the source's inline map types verbatim.
 #![allow(clippy::type_complexity)]
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use bevy_math::Vec3;
 
@@ -66,10 +66,28 @@ pub struct RailCensus {
     pub duplicates: usize,
 }
 
+/// The lips each candidate edge gave last build (`reuse`), by edge identity:
+/// its key and the face that defines it (the first upward face naming it).
+#[derive(Default)]
+pub struct RailCache {
+    edges: HashMap<u64, (u32, u32)>,
+    lips: Vec<(Vec3, Vec3)>,
+}
+
+/// The probes reach this far (metres) from an edge: past it, nothing a lip
+/// test reads (`reuse::Dirty` pad).
+const REUSE_PAD: f32 = 0.5;
+
 /// Rails over GTA-space triangles in metres (Z up), as polylines in metres.
 pub fn find_metres(tris: &[[Vec3; 3]]) -> (Vec<Vec<Vec3>>, RailCensus) {
+    find_metres_reusing(tris, &crate::reuse::Dirty::everything(), &mut RailCache::default())
+}
+
+/// As `find_metres`, keeping the lips of edges `dirty` leaves untouched from
+/// `cache`, which then holds this build's.
+pub fn find_metres_reusing(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, cache: &mut RailCache) -> (Vec<Vec<Vec3>>, RailCensus) {
     let inches: Vec<[Vec3; 3]> = tris.iter().map(|t| t.map(|v| v / INCH)).collect();
-    let (rails, census) = find(&inches);
+    let (rails, census) = find_reusing(&inches, dirty, INCH, cache);
     (
         rails
             .into_iter()
@@ -81,6 +99,11 @@ pub fn find_metres(tris: &[[Vec3; 3]]) -> (Vec<Vec<Vec3>>, RailCensus) {
 
 /// Rails over `tris` (map units, z up), each a polyline of two or more points.
 pub fn find(tris: &[[Vec3; 3]]) -> (Vec<Vec<Vec3>>, RailCensus) {
+    find_reusing(tris, &crate::reuse::Dirty::everything(), 1.0, &mut RailCache::default())
+}
+
+/// As `find`; `metres` converts map units to `dirty`'s metres.
+fn find_reusing(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, cache: &mut RailCache) -> (Vec<Vec<Vec3>>, RailCensus) {
     let grid = Grid::build(tris);
     let mut probe = Probe {
         tris,
@@ -96,18 +119,10 @@ pub fn find(tris: &[[Vec3; 3]]) -> (Vec<Vec<Vec3>>, RailCensus) {
         let (ka, kb) = (key(a), key(b));
         if ka < kb { (ka, kb) } else { (kb, ka) }
     };
-    // SkateV: the far vertex of every face across each edge, for the
-    // convexity gate below.
-    let mut across: HashMap<([i32; 3], [i32; 3]), Vec<Vec3>> = HashMap::new();
-    for tri in tris {
-        for i in 0..3 {
-            across
-                .entry(edge_key(tri[i], tri[(i + 1) % 3]))
-                .or_default()
-                .push(tri[(i + 2) % 3]);
-        }
-    }
-    let mut edges: HashMap<([i32; 3], [i32; 3]), (Vec3, Vec3, Vec3, Vec3)> = HashMap::new();
+    // Every edge of a walkable face (the first face to name it), in key
+    // order so the rails come out the same on every run.
+    let mut slot: HashMap<([i32; 3], [i32; 3]), u32> = HashMap::default();
+    let mut edges: Vec<(([i32; 3], [i32; 3]), (Vec3, Vec3, Vec3, Vec3))> = Vec::new();
     for tri in tris {
         let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
         if normal.z <= UPWARD_Z {
@@ -116,48 +131,104 @@ pub fn find(tris: &[[Vec3; 3]]) -> (Vec<Vec<Vec3>>, RailCensus) {
         let centroid = (tri[0] + tri[1] + tri[2]) / 3.;
         for i in 0..3 {
             let (a, b) = (tri[i], tri[(i + 1) % 3]);
-            edges.entry(edge_key(a, b)).or_insert((a, b, normal, centroid));
+            let k = edge_key(a, b);
+            slot.entry(k).or_insert_with(|| {
+                edges.push((k, (a, b, normal, centroid)));
+                edges.len() as u32 - 1
+            });
         }
     }
+    edges.sort_unstable_by_key(|e| e.0);
+    for (i, (k, _)) in edges.iter().enumerate() {
+        slot.insert(*k, i as u32);
+    }
+    // SkateV: every face across each candidate edge and its far vertex, for
+    // the convexity gate and the lip probes below (per edge, a list threaded
+    // through `fars`).
+    let mut head = vec![u32::MAX; edges.len()];
+    let mut fars: Vec<(Vec3, u32, u32)> = Vec::new();
+    for (t, tri) in tris.iter().enumerate() {
+        for i in 0..3 {
+            if let Some(&e) = slot.get(&edge_key(tri[i], tri[(i + 1) % 3])) {
+                fars.push((tri[(i + 2) % 3], t as u32, head[e as usize]));
+                head[e as usize] = fars.len() as u32 - 1;
+            }
+        }
+    }
+    let across = |e: usize| {
+        std::iter::successors(Some(head[e]).filter(|&f| f != u32::MAX), |&f| Some(fars[f as usize].2).filter(|&n| n != u32::MAX))
+            .map(|f| (fars[f as usize].0, fars[f as usize].1))
+    };
+    let mut faces = Vec::new();
     let candidates = edges.len();
 
     let mut lips = Vec::new();
-    for (k, (a, b, normal, centroid)) in edges {
-        let along = b - a;
-        let len = along.length();
-        if len < 1. || along.z.abs() > MAX_SLOPE * len {
-            continue;
+    let mut next = RailCache::default();
+    next.edges.reserve(edges.len());
+    for (e, &(k, (a, b, normal, centroid))) in edges.iter().enumerate() {
+        let id = k.0.iter().chain(&k.1).map(|&x| x as u32)
+            .chain([a, b, normal, centroid].iter().flat_map(|v| v.to_array()).map(f32::to_bits))
+            .fold(0u64, |h, x| crate::reuse::mix(h ^ x as u64));
+        let start = lips.len();
+        let reused = (!dirty.touches(a.min(b) * metres, a.max(b) * metres, REUSE_PAD))
+            .then(|| cache.edges.get(&id))
+            .flatten()
+            .map(|&(s, n)| lips.extend_from_slice(&cache.lips[s as usize..(s + n) as usize]))
+            .is_some();
+        'probe: {
+            if reused {
+                break 'probe;
+            }
+            let along = b - a;
+            let len = along.length();
+            if len < 1. || along.z.abs() > MAX_SLOPE * len {
+                break 'probe;
+            }
+            // SkateV: a lip is a convex edge. Where a face across the edge rises
+            // above this face's plane the ground climbs (a quarter-pipe or bank
+            // facet crease); the probes below run along the tilted face and can
+            // miss that, so it is rejected here.
+            let rises = across(e).any(|(far, _)| {
+                let from = far - a;
+                let off_edge = from - along * (from.dot(along) / (len * len));
+                off_edge.length() > 1e-3 && from.dot(normal) > CONCAVE_SIN * off_edge.length()
+            });
+            if rises {
+                break 'probe;
+            }
+            let mid = (a + b) * 0.5;
+            let mut out = along.cross(normal).normalize_or_zero();
+            if out.dot(centroid - mid) > 0. {
+                out = -out;
+            }
+            let samples: &[f32] = if len < 12. {
+                &[0.5]
+            } else {
+                &[0.25, 0.5, 0.75]
+            };
+            faces.clear();
+            faces.extend(across(e).map(|(_, t)| t));
+            // Two thirds of the samples must pass: stop once that is decided.
+            let need = (samples.len() * 2).div_ceil(3);
+            let (mut passing, mut failing) = (0, 0);
+            for &s in samples {
+                if passing >= need || failing > samples.len() - need {
+                    break;
+                }
+                if probe.is_lip(a + along * s, out, &faces) {
+                    passing += 1;
+                } else {
+                    failing += 1;
+                }
+            }
+            if passing >= need {
+                lips.extend(probe.unburied(a, b));
+            }
         }
-        // SkateV: a lip is a convex edge. Where a face across the edge rises
-        // above this face's plane the ground climbs (a quarter-pipe or bank
-        // facet crease); the probes below run along the tilted face and can
-        // miss that, so it is rejected here.
-        let rises = across[&k].iter().any(|&far| {
-            let from = far - a;
-            let off_edge = from - along * (from.dot(along) / (len * len));
-            off_edge.length() > 1e-3 && from.dot(normal) > CONCAVE_SIN * off_edge.length()
-        });
-        if rises {
-            continue;
-        }
-        let mid = (a + b) * 0.5;
-        let mut out = along.cross(normal).normalize_or_zero();
-        if out.dot(centroid - mid) > 0. {
-            out = -out;
-        }
-        let samples: &[f32] = if len < 12. {
-            &[0.5]
-        } else {
-            &[0.25, 0.5, 0.75]
-        };
-        let passing = samples
-            .iter()
-            .filter(|&&s| probe.is_lip(a + along * s, out))
-            .count();
-        if passing * 3 >= samples.len() * 2 {
-            lips.extend(probe.unburied(a, b));
-        }
+        next.edges.insert(id, (next.lips.len() as u32, (lips.len() - start) as u32));
+        next.lips.extend_from_slice(&lips[start..]);
     }
+    *cache = next;
     let lip_count = lips.len();
 
     let runs = merge_collinear(lips);
@@ -189,7 +260,7 @@ fn dedupe(rails: &mut Vec<Vec<Vec3>>) -> usize {
     let mut order: Vec<usize> = (0..rails.len()).collect();
     order.sort_by(|&a, &b| polyline_len(&rails[b]).total_cmp(&polyline_len(&rails[a])));
     // Kept segments by grid cell (every cell a segment's padded box touches).
-    let mut cells: HashMap<(i32, i32), Vec<(Vec3, Vec3)>> = HashMap::new();
+    let mut cells: HashMap<(i32, i32), Vec<(Vec3, Vec3)>> = HashMap::default();
     let mut keep = vec![false; rails.len()];
     for i in order {
         let rail = &rails[i];
@@ -258,10 +329,15 @@ struct Probe<'a> {
 }
 
 impl Probe<'_> {
-    /// Past `p` along `out` the ground falls away and nothing rises.
-    fn is_lip(&mut self, p: Vec3, out: Vec3) -> bool {
+    /// Past `p` along `out` the ground falls away and nothing rises. The
+    /// faces `across` the edge are tried first: on open ground one of them
+    /// takes the drop probe, and the grid would find it too.
+    fn is_lip(&mut self, p: Vec3, out: Vec3, across: &[u32]) -> bool {
         let down_from = p + out * PROBE_OUT + Vec3::Z;
-        if self.hit(down_from, -Vec3::Z, 1. + MIN_DROP) {
+        let tris = self.tris;
+        if across.iter().any(|&i| ray_triangle(down_from, -Vec3::Z, 1. + MIN_DROP, &tris[i as usize]))
+            || self.hit(down_from, -Vec3::Z, 1. + MIN_DROP)
+        {
             return false;
         }
         let across_from = p - out + Vec3::Z * WALL_PROBE_UP;
@@ -322,47 +398,42 @@ impl Probe<'_> {
         let tris = self.tris;
         let steps = ((b - a).length() / BURIED_STEP).ceil().max(1.) as usize;
         let side = Vec3::new(a.y - b.y, b.x - a.x, 0.).normalize_or_zero() * BURIED_SIDE;
-        // Candidates by sample: the rays at lip fraction t meet only
-        // triangles whose plan box spans t along the lip (the side offsets
-        // are perpendicular to it), padded by a step.
-        let d = Vec3::new(b.x - a.x, b.y - a.y, 0.);
-        let buckets: Vec<Vec<u32>> = if d.length_squared() > 1. {
-            let mut buckets = vec![Vec::new(); steps + 1];
-            for &i in &candidates {
-                let t = &tris[i as usize];
-                let (lo, hi) = (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]));
-                let (mut t0, mut t1) = (f32::MAX, f32::MIN);
-                for c in [Vec3::new(lo.x, lo.y, 0.), Vec3::new(lo.x, hi.y, 0.), Vec3::new(hi.x, lo.y, 0.), Vec3::new(hi.x, hi.y, 0.)] {
-                    let f = (c - Vec3::new(a.x, a.y, 0.)).dot(d) / d.length_squared();
-                    t0 = t0.min(f);
-                    t1 = t1.max(f);
-                }
-                let first = ((t0 * steps as f32).floor() - 1.).max(0.) as usize;
-                let last = ((t1 * steps as f32).ceil() + 1.).min(steps as f32);
-                if last < 0. || first > steps {
-                    continue;
-                }
-                for bucket in &mut buckets[first..=last as usize] {
-                    bucket.push(i);
-                }
+        let offsets = [Vec3::ZERO, side, -side];
+        // Per candidate and ray line (the lip, and the lip moved a truck's
+        // half width to either side): the stretch of lip fractions over the
+        // triangle's plan, padded a quarter inch. A vertical ray outside it
+        // cannot meet the triangle; one inside is tested as before. Faces
+        // the vertical rays cannot hit (Möller–Trumbore's determinant, as
+        // `ray_triangle` computes it) are dropped.
+        let d = b - a;
+        let pad = 0.25 / Vec3::new(d.x, d.y, 0.).length().max(1e-3);
+        let mut spans: Vec<(u32, [(f32, f32); 3])> = Vec::with_capacity(candidates.len());
+        for &i in &candidates {
+            let t = &tris[i as usize];
+            let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
+            if e1.dot(Vec3::Z.cross(e2)).abs() < 1e-8 {
+                continue;
             }
-            buckets
-        } else {
-            vec![candidates]
-        };
+            let lines = offsets.map(|off| plan_span(a + off, d, t, pad));
+            if lines.iter().any(|(t0, t1)| t0 <= t1) {
+                spans.push((i, lines));
+            }
+        }
+        if spans.is_empty() {
+            return vec![(a, b)];
+        }
         let buried = |p: Vec3, f: f32| {
-            let near = &buckets[((f * steps as f32).round() as usize).min(buckets.len() - 1)];
-            [Vec3::ZERO, side, -side].into_iter().any(|off| {
+            offsets.iter().enumerate().any(|(k, &off)| {
                 let origin = p + off + Vec3::Z * 0.5;
                 // Faces wholly below or above the ray are skipped: nearly
                 // parallel to it (a wall face ending at the lip) Möller–Trumbore
                 // can report them hit.
-                // Faces wholly below or above the ray are skipped: nearly
-                // parallel to it (a wall face ending at the lip) Möller–Trumbore
-                // can report them hit.
-                near.iter().any(|&i| {
-                    let t = &tris[i as usize];
-                    t[0].z.max(t[1].z).max(t[2].z) >= origin.z
+                spans.iter().any(|(i, lines)| {
+                    let (t0, t1) = lines[k];
+                    let t = &tris[*i as usize];
+                    f >= t0
+                        && f <= t1
+                        && t[0].z.max(t[1].z).max(t[2].z) >= origin.z
                         && t[0].z.min(t[1].z).min(t[2].z) <= origin.z + BURIED_CLEARANCE
                         && ray_triangle(origin, Vec3::Z, BURIED_CLEARANCE, t)
                 })
@@ -439,6 +510,36 @@ impl Probe<'_> {
     }
 }
 
+/// The fractions `t` in 0..=1 where point `from + along * t` lies over
+/// triangle `tri` in plan (XY), widened by `pad`; empty (t0 > t1) if none.
+fn plan_span(from: Vec3, along: Vec3, tri: &[Vec3; 3], pad: f32) -> (f32, f32) {
+    let (mut t0, mut t1) = (0f32, 1f32);
+    // Counterclockwise in plan: inside is left of every edge.
+    let ccw = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) - (tri[1].y - tri[0].y) * (tri[2].x - tri[0].x) > 0.;
+    for i in 0..3 {
+        let (p, q) = if ccw { (tri[i], tri[(i + 1) % 3]) } else { (tri[(i + 1) % 3], tri[i]) };
+        let (ex, ey) = (q.x - p.x, q.y - p.y);
+        let len = (ex * ex + ey * ey).sqrt();
+        if len < 1e-9 {
+            continue;
+        }
+        // Signed distance left of the edge, linear in t: s0 + ds * t >= -pad_dist.
+        let s0 = (ex * (from.y - p.y) - ey * (from.x - p.x)) / len;
+        let ds = (ex * along.y - ey * along.x) / len;
+        let slack = s0 + pad * (along.x * along.x + along.y * along.y).sqrt() + 0.25;
+        if ds.abs() < 1e-12 {
+            if slack < 0. {
+                return (1., 0.);
+            }
+        } else if ds > 0. {
+            t0 = t0.max(-slack / ds);
+        } else {
+            t1 = t1.min(-slack / ds);
+        }
+    }
+    (t0 - pad, t1 + pad)
+}
+
 /// Möller–Trumbore, both faces, hits within `(0, len]`.
 fn ray_triangle(origin: Vec3, dir: Vec3, len: f32, tri: &[Vec3; 3]) -> bool {
     let e1 = tri[1] - tri[0];
@@ -465,7 +566,7 @@ fn ray_triangle(origin: Vec3, dir: Vec3, len: f32, tri: &[Vec3; 3]) -> bool {
 
 /// Lips on one line, merged into maximal runs where they overlap or touch.
 fn merge_collinear(lips: Vec<(Vec3, Vec3)>) -> Vec<(Vec3, Vec3)> {
-    let mut lines: HashMap<([i32; 3], [i32; 3]), (Vec3, Vec3, Vec<(f32, f32)>)> = HashMap::new();
+    let mut lines: HashMap<([i32; 3], [i32; 3]), (Vec3, Vec3, Vec<(f32, f32)>)> = HashMap::default();
     for (mut a, mut b) in lips {
         let mut d = (b - a).normalize_or_zero();
         if d == Vec3::ZERO {
@@ -486,7 +587,9 @@ fn merge_collinear(lips: Vec<(Vec3, Vec3)>) -> Vec<(Vec3, Vec3)> {
         line.2.push((a.dot(line.0), b.dot(line.0)));
     }
     let mut runs = Vec::new();
-    for (d, o, mut spans) in lines.into_values() {
+    let mut lines: Vec<_> = lines.into_iter().collect();
+    lines.sort_unstable_by_key(|(k, _)| *k);
+    for (_, (d, o, mut spans)) in lines {
         spans.sort_by(|x, y| x.0.total_cmp(&y.0));
         let mut current = spans[0];
         for &(t0, t1) in &spans[1..] {
@@ -506,7 +609,7 @@ fn merge_collinear(lips: Vec<(Vec3, Vec3)>) -> Vec<(Vec3, Vec3)> {
 /// runs meet at a gentle turn.
 fn chain(runs: Vec<(Vec3, Vec3)>) -> Vec<Vec<Vec3>> {
     let node = |v: Vec3| v.to_array().map(|x| x.round() as i32);
-    let mut at: HashMap<[i32; 3], Vec<(usize, bool)>> = HashMap::new();
+    let mut at: HashMap<[i32; 3], Vec<(usize, bool)>> = HashMap::default();
     for (i, (a, b)) in runs.iter().enumerate() {
         at.entry(node(*a)).or_default().push((i, false));
         at.entry(node(*b)).or_default().push((i, true));

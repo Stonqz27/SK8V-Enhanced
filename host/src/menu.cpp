@@ -248,7 +248,7 @@ void Tick() {
     // frame the menu closes.
     const auto disableControls = [] {
         for (int c = 0; c < 360; ++c)
-            if (c != 199 && c != 200) Call<void>(gta::DISABLE_CONTROL_ACTION, 0, c, 1);
+            if (c != 199 && c != 200) Call<void>(gta::DISABLE_CONTROL_ACTION, 0, c, 0); // each named: no related walk (main.cpp)
     };
     if (!g_open) {
         if (g_closing) disableControls();

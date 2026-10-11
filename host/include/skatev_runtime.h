@@ -317,6 +317,19 @@ using SvSetPhysicsLevelFn = std::uint32_t(__cdecl*)(void*, std::uint64_t, std::u
 // Enhanced hosts require this export and must reject an unported Legacy DLL.
 using SvSetEnhancedPhysicsLevelFn = SvSetPhysicsLevelFn;
 
+// sv_ground_at(rt, point, depth, out): the highest walkable GTA static
+// collision from 0.1 m above `point` to `depth` below it (the latest built
+// area), with its materials.dat index. Returns 1 and fills `out`.
+// Export: sv_ground_at.
+struct SvGround {
+    std::uint32_t size;     // sizeof(SvGround)
+    std::uint32_t material; // GTA materials.dat index
+    float height;
+    SvVec3 normal;          // up-facing
+};
+static_assert(sizeof(SvGround) == 24);
+using SvGroundAtFn = std::uint32_t(__cdecl*)(const void*, const SvVec3*, float, SvGround*);
+
 // sv_skitch_vehicle(rt): GTA handle of the vehicle being skitched, 0 when none.
 // Export: sv_skitch_vehicle.
 using SvSkitchVehicleFn = std::uint32_t(__cdecl*)(const void*);
@@ -333,6 +346,15 @@ using SvSetLipRuleFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
 
 // sv_set_camera_type(rt, type): Skate 3's camera, 0 Low, 1 High (default). Export: sv_set_camera_type.
 using SvSetCameraTypeFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
+// sv_set_gestures(rt, up, down, left, right): Skate 3's d-pad gestures, catalog indices 0..36;
+// any index 37 or above turns them off. Export: sv_set_gestures.
+using SvSetGesturesFn = std::uint32_t(__cdecl*)(void*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+// sv_set_posture(rt, profile): 0 none, 1 stiff, 2 slouch, 3 buff. Export: sv_set_posture.
+using SvSetPostureFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
+// sv_set_riding_style(rt, style): 0 none, 1 Loose, 2 Gonzo, 3 Aggressive. Export: sv_set_riding_style.
+using SvSetRidingStyleFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
+// sv_set_equipment(rt, truck, wheel): truck tightness, wheel hardness, 0..1. Export: sv_set_equipment.
+using SvSetEquipmentFn = std::uint32_t(__cdecl*)(void*, float, float);
 // sv_set_difficulty(rt, index): Skate 3's physics_mode, 0 easy, 1 normal,
 // 2 hardcore, 3 motorized; live and for later sessions. Returns 1 when queued.
 // Export: sv_set_difficulty.

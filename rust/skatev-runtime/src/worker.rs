@@ -75,6 +75,14 @@ pub enum Job {
     LipRule(bool),
     Difficulty(u32),
     CameraType(u32),
+    /// D-pad gestures [up, down, left, right] (None: off).
+    Gestures(Option<[u32; 4]>),
+    /// Posture profile: 0 none, 1 stiff, 2 slouch, 3 buff.
+    Posture(u32),
+    /// Riding style: 0 none, 1 Loose, 2 Gonzo, 3 Aggressive.
+    RidingStyle(u32),
+    /// Truck tightness, wheel hardness (0..1).
+    Equipment(f32, f32),
     /// Metres behind a car's rear the skitch grab line sits.
     SkitchStandoff(f32),
     /// Play a showcase line (`line.rs`) from its start while skating.
@@ -573,7 +581,11 @@ fn set(shared: &Mutex<Shared>, status: u32, message: impl Into<String>) {
     s.message = message.into();
 }
 
-type Built = (Vec3, Result<(PreparedCollision, usize, usize), String>);
+/// Streamed-in or dropped collision within this (plus 32 m and the bound's
+/// own size) of the player rebuilds the area (`live::changed_near`).
+const LIVE_NEAR: f32 = 16.0;
+
+type Built = (Vec3, Result<(PreparedCollision, usize, usize, Vec<crate::live::Seen>), String>);
 
 fn run(
     data_root: PathBuf,
@@ -667,12 +679,19 @@ fn run(
     // GTA's collision in the area changed: rebuild the working set in place.
     let mut rebuild_area = false;
     // GTA's physics level (live collision): the newest report from the host
-    // not yet applied, the level in use, and the fingerprint of the bounds
-    // loaded in the installed area (when it changes, GTA streamed collision
-    // in or out and the area is rebuilt).
+    // not yet applied, the level in use, and the bounds the installed area
+    // was read from (when GTA streams collision in or out near the skater,
+    // the area is rebuilt; empty: not known, the next check rebuilds).
     let mut pending_live: Option<Option<crate::live::Level>> = None;
     let mut live_level: Option<crate::live::Level> = None;
-    let mut live_sig: Option<(Vec3, u64)> = None;
+    let mut installed_bounds: Arc<Vec<crate::live::Seen>> = Arc::default();
+    // The check reads GTA's whole physics table (tens of thousands of
+    // ReadProcessMemory calls): on its own below-normal thread, not this
+    // above-normal one, where its bursts took cores from GTA's threads.
+    let stream_check = start_stream_check()
+        .map_err(|e| log(&format!("live collision streaming check not started: {e}")))
+        .ok();
+    let mut checking = false;
     let mut live_checked = std::time::Instant::now();
     let mut live_rebuilt = std::time::Instant::now();
     let mut prepare_failed_at: Option<Vec3> = None;
@@ -686,11 +705,14 @@ fn run(
     let mut lip_rule = true;
     let mut difficulty = 0u32;
     let mut camera_type = 1u32;
+    let mut prefs = SkaterPrefs::default();
     let mut last_speed = 0.0f32;
     let mut last_root = bevy_math::Vec3::ZERO;
     let mut perf = Perf::new();
     let mut assist = BackwardsManAssist::new(BackwardsManConfig::default());
     let mut assist_packet = 0u32;
+    // The right stick Skate was fed last (the Trick Analyzer replays it).
+    let mut right_stick = [0i16; 2];
     let mut line_player = crate::line::Player::default();
     let mut latest_dynamic = Vec::new();
     // Skitch grab lines as last sampled by the host, and when. Skate ticks at
@@ -755,7 +777,7 @@ fn run(
             };
             match result {
                 Ok(mut s) => {
-                    apply_settings(&mut s, hom.enabled(), bail_limit, air_limit, lip_rule, difficulty, camera_type);
+                    apply_settings(&mut s, hom.enabled(), bail_limit, air_limit, lip_rule, difficulty, camera_type, prefs);
                     session = Some(s);
                     life(shared, |l| {
                         l.session_builds += 1;
@@ -804,7 +826,7 @@ fn run(
                             shared,
                             log,
                         )?;
-                        apply_settings(&mut s, hom.enabled(), bail_limit, air_limit, lip_rule, difficulty, camera_type);
+                        apply_settings(&mut s, hom.enabled(), bail_limit, air_limit, lip_rule, difficulty, camera_type, prefs);
                         builder_jobs = Some(sender);
                         session = Some(s);
                         audio_state = crate::audio::map::State::default();
@@ -821,9 +843,10 @@ fn run(
                                 "finishing Los Santos collision here",
                             );
                             match built.recv_timeout(std::time::Duration::from_secs(60)) {
-                                Ok((centre, Ok((prepared, n, r)))) => {
+                                Ok((centre, Ok((prepared, n, r, bounds)))) => {
                                     s.install_collision(prepared)?;
                                     built_at = centre;
+                                    installed_bounds = Arc::new(bounds);
                                     life(shared, |l| {
                                         l.collision_builds += 1;
                                         l.collision_centre = centre;
@@ -853,6 +876,7 @@ fn run(
                                         area.rails,
                                     )?)?;
                                     built_at = spawn;
+                                    installed_bounds = Arc::new(area.bounds);
                                     life(shared, |l| {
                                         l.collision_builds += 1;
                                         l.collision_centre = spawn;
@@ -976,6 +1000,34 @@ fn run(
                         s.set_camera_type(t);
                     }
                 }
+                Job::Gestures(g) => {
+                    log(&format!("gestures: {g:?}"));
+                    prefs.gestures = g;
+                    if let Some(s) = session.as_mut() {
+                        s.set_gestures(g);
+                    }
+                }
+                Job::Posture(p) => {
+                    log(&format!("posture: {p}"));
+                    prefs.posture = p;
+                    if let Some(s) = session.as_mut() {
+                        s.set_posture(p);
+                    }
+                }
+                Job::RidingStyle(style) => {
+                    log(&format!("riding style: {style}"));
+                    prefs.style = style;
+                    if let Some(s) = session.as_mut() {
+                        s.set_riding_style(style);
+                    }
+                }
+                Job::Equipment(truck, wheel) => {
+                    log(&format!("equipment: truck tightness {truck:.2}, wheel hardness {wheel:.2}"));
+                    prefs.equipment = (truck, wheel);
+                    if let Some(s) = session.as_mut() {
+                        s.set_equipment(truck, wheel);
+                    }
+                }
                 Job::PhysicsLevel(level) => pending_live = Some(level),
                 Job::SkitchStandoff(metres) => {
                     log(&format!("skitch standoff: {metres:.2} m behind the rear"));
@@ -1022,6 +1074,7 @@ fn run(
                         )?)?;
                         s.set_dynamic_surfaces(&latest_dynamic);
                         built_at = line.start;
+                        installed_bounds = Arc::new(area.bounds);
                         life(shared, |l| {
                             l.collision_builds += 1;
                             l.collision_centre = line.start;
@@ -1119,6 +1172,7 @@ fn run(
                     for line in monitor.log.drain(..) {
                         log(&line);
                     }
+                    right_stick = if pad.connected { pad.right } else { [0; 2] };
                     let frame = if pad.connected {
                         InputFrame::from_pad(
                             pad.buttons,
@@ -1160,7 +1214,7 @@ fn run(
                     log,
                 ) {
                     Ok((mut s, sender)) => {
-                        apply_settings(&mut s, hom.enabled(), bail_limit, air_limit, lip_rule, difficulty, camera_type);
+                        apply_settings(&mut s, hom.enabled(), bail_limit, air_limit, lip_rule, difficulty, camera_type, prefs);
                         builder_jobs = Some(sender);
                         session = Some(s);
                         audio_state = crate::audio::map::State::default();
@@ -1197,7 +1251,9 @@ fn run(
         // Finished builds wait in the channel until the session exists.
         if let Some(s) = session.as_mut() {
             if let Ok((centre, result)) = built.try_recv() {
-                if pending_centre.take().is_some() {
+                // Only moved areas time the lead: a rebuild in place reuses
+                // most of the last one and runs faster.
+                if pending_centre.take().is_some() && centre.truncate() != built_at.truncate() {
                     let took = requested_at.elapsed().as_secs_f32().clamp(0.2, 15.0);
                     build_secs = build_secs * 0.6 + took * 0.4;
                 }
@@ -1214,13 +1270,14 @@ fn run(
                             centre.x, centre.y
                         ))
                     }
-                    Ok((prepared, n, r)) => {
+                    Ok((prepared, n, r, bounds)) => {
                         let t = std::time::Instant::now();
                         s.install_collision(prepared)?;
                         s.set_dynamic_surfaces(&latest_dynamic);
                         perf.install(t.elapsed());
                         let first = built_at == PRELOAD_AT;
                         built_at = centre;
+                        installed_bounds = Arc::new(bounds);
                         stream_failed_at = None;
                         life(shared, |l| {
                             l.collision_builds += 1;
@@ -1238,10 +1295,11 @@ fn run(
                         }
                         if verbose() {
                             log(&format!(
-                                "collision streamed around ({:.0}, {:.0}){}: {n} triangles, {r} rails",
+                                "collision streamed around ({:.0}, {:.0}){}: {n} triangles, {r} rails, {}ms after the request",
                                 centre.x,
                                 centre.y,
-                                if active { "" } else { " while inactive" }
+                                if active { "" } else { " while inactive" },
+                                requested_at.elapsed().as_millis()
                             ));
                         }
                     }
@@ -1261,7 +1319,6 @@ fn run(
                     w.set_live(level);
                     pending_live = None;
                     live_level = level;
-                    live_sig = None;
                     rebuild_area = true;
                     prepare_failed_at = None;
                     stream_failed_at = None;
@@ -1274,30 +1331,36 @@ fn run(
                 Err(std::sync::TryLockError::Poisoned(_)) => return Err("world cache poisoned".into()),
             }
         }
-        // GTA streams collision in and out: a changed set of static bounds in
-        // the installed area asks for a rebuild (checked twice a second at
-        // most, rebuilt at most every 6 s).
-        if let Some(level) = live_level
-            && pending_centre.is_none()
-            && built_at != PRELOAD_AT
-            && live_checked.elapsed().as_secs_f32() >= 0.5
-        {
-            live_checked = std::time::Instant::now();
-            if let Ok(sig) = level.signature([built_at.x, built_at.y], world::RADIUS) {
-                match live_sig {
-                    Some((at, was)) if at == built_at => {
-                        if was != sig && live_rebuilt.elapsed().as_secs_f32() >= 6.0 {
-                            rebuild_area = true;
-                            live_rebuilt = std::time::Instant::now();
-                            live_sig = None;
-                            if verbose() {
-                                log("live collision: GTA loaded or dropped collision in the area, rebuilding");
-                            }
-                        }
-                    }
-                    _ => live_sig = Some((built_at, sig)),
+        // GTA streams collision in and out: a static bound loaded or dropped
+        // near the skater (or the walking player) since the installed area
+        // was read asks for a rebuild (checked once a second, rebuilt at most
+        // every 6 s). Streaming at the area's edge waits until the player
+        // gets near it, or for the next recentre: the edge streams as the
+        // player moves, and rebuilding on it kept a core busy.
+        if let Some((changed, checked)) = stream_check.as_ref().and_then(|(_, done)| done.try_recv().ok()) {
+            checking = false;
+            // A result for an area since replaced is stale.
+            if changed
+                && Arc::ptr_eq(&checked, &installed_bounds)
+                && pending_centre.is_none()
+                && live_rebuilt.elapsed().as_secs_f32() >= 6.0
+            {
+                rebuild_area = true;
+                live_rebuilt = std::time::Instant::now();
+                if verbose() {
+                    log("live collision: GTA loaded or dropped collision near the player, rebuilding");
                 }
             }
+        }
+        if let (Some(level), Some(t), Some((jobs, _))) = (live_level, target, stream_check.as_ref())
+            && !checking
+            && pending_centre.is_none()
+            && built_at != PRELOAD_AT
+            && live_checked.elapsed().as_secs_f32() >= 1.0
+            && live_rebuilt.elapsed().as_secs_f32() >= 6.0
+        {
+            live_checked = std::time::Instant::now();
+            checking = jobs.send((level, [t.x, t.y], Arc::clone(&installed_bounds))).is_ok();
         }
         // Requests go out before the preloaded session exists, too.
         // Collision GTA streamed in or out rebuilds the working set where the
@@ -1309,7 +1372,14 @@ fn run(
             && (world::needs_recentre_moving(built_at, t, velocity, build_secs) || rebuild_area)
             && stream_failed_at.is_none_or(|f| world::needs_recentre(f, t) || rebuild_area)
         {
-            let centre = world::lead_centre(t, velocity, build_secs);
+            // Streaming alone rebuilds in place while the area still covers
+            // the player: only what GTA streamed changes, and the rest is
+            // reused (`reuse`).
+            let centre = if world::needs_recentre_moving(built_at, t, velocity, build_secs) {
+                world::lead_centre(t, velocity, build_secs)
+            } else {
+                Vec3::new(built_at.x, built_at.y, t.z)
+            };
             if builder_jobs.as_ref().is_some_and(|b| b.send(centre).is_ok()) {
                 pending_centre = Some(centre);
                 requested_at = std::time::Instant::now();
@@ -1349,6 +1419,7 @@ fn run(
                 match next {
                     crate::line::Next::Frame(f) => {
                         assist_packet = assist_packet.wrapping_add(1);
+                        right_stick = f.right;
                         s.collect(
                             InputFrame::from_pad(f.buttons, f.triggers, f.left, f.right, assist_packet),
                             period,
@@ -1376,6 +1447,7 @@ fn run(
                 }
                 if let Some(i) = injected {
                     assist_packet = assist_packet.wrapping_add(1);
+                    right_stick = i.right_stick;
                     s.collect(
                         InputFrame::from_pad(
                             i.buttons,
@@ -1422,7 +1494,7 @@ fn run(
                 let now = crate::records::now();
                 shared.lock().unwrap().records.add(crate::records::Category::HallOfMeat, total, now, log);
             }
-            hud.tick(s, &hom, shared, log);
+            hud.tick(s, &hom, right_stick, shared, log);
             crate::audio::on_tick(s, &pose, &mut audio_state);
             advanced = Some(pose);
         }
@@ -1686,13 +1758,33 @@ fn life(shared: &Mutex<Shared>, f: impl FnOnce(&mut LifecycleShared)) {
     f(&mut shared.lock().unwrap().lifecycle);
 }
 
+/// The skater's own preferences (overlay patches 0045, 0047), kept across sessions.
+#[derive(Clone, Copy)]
+struct SkaterPrefs {
+    gestures: Option<[u32; 4]>,
+    posture: u32,
+    style: u32,
+    equipment: (f32, f32),
+}
+
+impl Default for SkaterPrefs {
+    fn default() -> Self {
+        // Retail's reset values: no gestures, posture or style, 0.7 trucks and wheels.
+        Self { gestures: None, posture: 0, style: 0, equipment: (0.7, 0.7) }
+    }
+}
+
 /// The host settings a new session starts with; later changes are applied
 /// by their jobs (plain session fields, kept across activations).
 fn apply_settings(s: &mut Session, hall_of_meat: bool, bail: Option<f32>, air: Option<f32>, lip: bool, difficulty: u32,
-                  camera_type: u32) {
+                  camera_type: u32, prefs: SkaterPrefs) {
     s.set_hall_of_meat(hall_of_meat);
     s.set_difficulty(difficulty);
     s.set_camera_type(camera_type);
+    s.set_gestures(prefs.gestures);
+    s.set_posture(prefs.posture);
+    s.set_riding_style(prefs.style);
+    s.set_equipment(prefs.equipment.0, prefs.equipment.1);
     s.set_bail_maximum_time(bail);
     s.set_air_time_limit(air);
     s.set_lip_rule(lip);
@@ -1889,6 +1981,29 @@ fn log_source(log: &Log, centre: Vec3, note: &str) {
     }
 }
 
+type StreamCheck = (crate::live::Level, [f32; 2], Arc<Vec<crate::live::Seen>>);
+
+/// The live streaming check's thread: for each (level, player, installed
+/// bounds) job, whether GTA streamed collision in or out near the player
+/// (`live::changed_near`), with the bounds it was checked against.
+fn start_stream_check() -> Result<(mpsc::Sender<StreamCheck>, mpsc::Receiver<(bool, Arc<Vec<crate::live::Seen>>)>), String> {
+    let (send, jobs) = mpsc::channel::<StreamCheck>();
+    let (done, results) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("skatev-stream-check".into())
+        .spawn(move || {
+            set_thread_priority(THREAD_PRIORITY_BELOW_NORMAL);
+            while let Ok((level, at, installed)) = jobs.recv() {
+                let changed = level.near(at, LIVE_NEAR).is_ok_and(|now| crate::live::changed_near(&installed, &now, at, LIVE_NEAR));
+                if done.send((changed, installed)).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok((send, results))
+}
+
 fn start_builder(
     builder: CollisionBuilder,
     static_world: Arc<Mutex<StaticWorld>>,
@@ -1916,6 +2031,7 @@ fn start_builder(
                         builder.build_tagged(area.triangles, area.tags, area.rails)?,
                         n,
                         r,
+                        area.bounds,
                     ))
                 }))
                 .unwrap_or_else(|_| Err("collision builder panicked".into()));
@@ -1965,7 +2081,10 @@ fn publish(
     tricks: &mut Vec<String>,
     log: &Log,
 ) -> Published {
-    let board_pose = crate::board_pose::world(&p.names, &p.bones, p.root);
+    let board_pose = crate::board_pose::world(&p.names, &p.bones, p.root).map(|mut w| {
+        crate::board_pose::present_wheels(&mut w, p.tick);
+        w
+    });
     let mut presenter = presenter;
     let (mut mesh, textures, character_pose, board_entity) = presenter
         .as_deref_mut()

@@ -39,8 +39,20 @@ foreach ($pin in $Pins) {
 # Lib\site-packages from site. Setup sets PYTHONNOUSERSITE so packages from the
 # player's own Python cannot shadow these.
 Remove-Item "$stage\py\python*._pth"
-$check = & "$stage\py\python.exe" -s -c "import numpy, PIL, sys; print(sys.version.split()[0], numpy.__version__, PIL.__version__)"
-if ($LASTEXITCODE) { throw 'the downloaded Python does not start' }
+# Setup runs it pinned to its folder too: without PYTHONHOME it adds a registered Python 3.13's Lib and
+# DLLs from the registry ahead of its own (setup-wizard.ps1).
+$env:PYTHONHOME = "$stage\py"; $env:PYTHONPATH = $null
+$ErrorActionPreference = 'Continue'  # under Stop, 5.1 turns the redirected stderr into an exception
+$check = & "$stage\py\python.exe" -s -c "import ctypes, numpy, PIL, sys; print(sys.version.split()[0], numpy.__version__, PIL.__version__)" 2>&1
+$failed = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($failed) {
+  $why = [string]($check | Select-Object -Last 1)
+  # A file gone right after extraction is antivirus software quarantining it.
+  $gone = @('libffi-8.dll', '_ctypes.pyd', 'vcruntime140.dll', 'python313.dll') | Where-Object { -not (Test-Path "$stage\py\$_") }
+  if ($gone) { throw "antivirus software removed $($gone -join ', ') from the downloaded Python; allow it (or exclude the SK8V folder) and press Try again. ($why)" }
+  throw "the downloaded Python cannot load its modules: $why"
+}
 if (Test-Path $Target) { Remove-Item -LiteralPath $Target -Recurse -Force }
 Move-Item -LiteralPath "$stage\py" $Target
 Remove-Item -LiteralPath $stage -Recurse -Force

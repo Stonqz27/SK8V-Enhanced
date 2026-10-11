@@ -1,7 +1,7 @@
 //! XY bucket grid of items by the cells their XY bounds touch, with the
 //! barycentric height tests its users run on the triangles found there.
 use bevy_math::Vec3;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Debug, Default)]
 pub struct XyGrid {
@@ -11,7 +11,7 @@ pub struct XyGrid {
 
 impl XyGrid {
     pub fn new(cell: f32) -> Self {
-        Self { cell, cells: HashMap::new() }
+        Self { cell, cells: HashMap::default() }
     }
 
     /// Every triangle of `tris`, by index.

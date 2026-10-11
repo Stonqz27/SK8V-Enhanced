@@ -71,6 +71,7 @@ unsafe extern "system" {
     fn CreateEventW(attributes: *const c_void, manual: i32, initial: i32, name: *const u16) -> isize;
     fn SetEvent(event: isize) -> i32;
     fn WaitForSingleObject(handle: isize, ms: u32) -> u32;
+    fn RtlCaptureStackBackTrace(skip: u32, count: u32, frames: *mut *mut c_void, hash: *mut u32) -> u16;
 }
 
 #[link(name = "dbghelp")]
@@ -87,9 +88,11 @@ unsafe extern "system" {
 }
 
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
-/// MiniDumpWithDataSegs | WithHandleData | WithIndirectlyReferencedMemory |
-/// WithProcessThreadData | WithThreadInfo | WithUnloadedModules.
-const DUMP_KIND: u32 = 0x1 | 0x4 | 0x40 | 0x100 | 0x1000 | 0x20;
+/// MiniDumpWithIndirectlyReferencedMemory | WithProcessThreadData |
+/// WithThreadInfo | WithUnloadedModules: stacks and what they point at, a few
+/// MB. Not WithDataSegs: GTA's data sections made dumps too big for players
+/// to send (2026-10-10); the stack line in the log carries the call chain.
+const DUMP_KIND: u32 = 0x40 | 0x100 | 0x1000 | 0x20;
 
 struct State {
     dir: PathBuf,
@@ -194,6 +197,13 @@ static P_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 static P_ACCESS: [AtomicUsize; 3] = [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)];
 static P_THREAD: AtomicU32 = AtomicU32::new(0);
 static P_POINTERS: AtomicUsize = AtomicUsize::new(0);
+/// The faulting thread's return addresses (through the exception dispatch).
+static P_FRAMES: [AtomicUsize; 48] = [const { AtomicUsize::new(0) }; 48];
+static P_FRAME_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Fault addresses already reported, and how often they came back.
+static SEEN: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
+static SEEN_COUNT: AtomicUsize = AtomicUsize::new(0);
+static REPEATS: AtomicUsize = AtomicUsize::new(0);
 static REQUEST: AtomicIsize = AtomicIsize::new(0);
 static DONE: AtomicIsize = AtomicIsize::new(0);
 
@@ -201,8 +211,21 @@ unsafe extern "system" fn on_exception(p: *mut ExceptionPointers) -> i32 {
     let Some(rec) = (unsafe { p.as_ref() }).and_then(|p| unsafe { p.record.as_ref() }) else {
         return EXCEPTION_CONTINUE_SEARCH;
     };
-    if fatal(rec.code).is_none() || LINES.fetch_add(1, Ordering::Relaxed) >= 60 {
+    if fatal(rec.code).is_none() {
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // A fault another module catches and hits again every frame (Rampage.asi, 2026-10-11):
+    // reported once, then only counted, so the game thread doesn't wait on the reporter each time.
+    let address = rec.address as usize;
+    if address != 0 && SEEN.iter().any(|a| a.load(Ordering::Relaxed) == address) {
+        REPEATS.fetch_add(1, Ordering::Relaxed);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if LINES.fetch_add(1, Ordering::Relaxed) >= 60 {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if let Some(slot) = SEEN.get(SEEN_COUNT.fetch_add(1, Ordering::Relaxed)) {
+        slot.store(address, Ordering::Relaxed);
     }
     let (request, done) = (REQUEST.load(Ordering::Acquire), DONE.load(Ordering::Acquire));
     if request == 0 || done == 0 {
@@ -218,6 +241,17 @@ unsafe extern "system" fn on_exception(p: *mut ExceptionPointers) -> i32 {
     P_ACCESS[1].store(rec.info[0], Ordering::Relaxed);
     P_ACCESS[2].store(rec.info[1], Ordering::Relaxed);
     P_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+    // Not on a spent stack (overflow): the walk itself needs some.
+    let mut frames = [std::ptr::null_mut::<c_void>(); 48];
+    let n = if rec.code == 0xC000_00FD {
+        0
+    } else {
+        unsafe { RtlCaptureStackBackTrace(0, 48, frames.as_mut_ptr(), std::ptr::null_mut()) as usize }
+    };
+    for (slot, f) in P_FRAMES.iter().zip(&frames[..n]) {
+        slot.store(*f as usize, Ordering::Relaxed);
+    }
+    P_FRAME_COUNT.store(n, Ordering::Relaxed);
     P_POINTERS.store(p as usize, Ordering::Release);
     unsafe {
         SetEvent(request);
@@ -248,6 +282,17 @@ fn reporter() {
             fatal(code).unwrap_or("?"),
             address - base
         ));
+        let frames: Vec<String> = P_FRAMES[..P_FRAME_COUNT.load(Ordering::Relaxed)]
+            .iter()
+            .map(|f| {
+                let f = f.load(Ordering::Relaxed);
+                let (base, module) = module_of(f);
+                format!("{module}+{:#x}", f - base)
+            })
+            .collect();
+        if !frames.is_empty() {
+            write_line(&format!("crash: stack {}", frames.join(" < ")));
+        }
         // Our own module, any stack overflow, and the first two elsewhere.
         let n = DUMPS.load(Ordering::Relaxed);
         if (own || code == 0xC000_00FD || n < 2) && n < 4 {
@@ -271,9 +316,15 @@ fn watchdog() {
     let mut stall_dumped = false;
     let base_private = private_bytes();
     let mut next_memory = base_private + (1 << 30);
+    let (mut repeats, mut repeats_at) = (0, 0);
     loop {
         std::thread::sleep(Duration::from_millis(250));
         let now = now_ms();
+        let r = REPEATS.load(Ordering::Relaxed);
+        if r != repeats && now >= repeats_at + 10_000 {
+            write_line(&format!("crash: reported faults came back {} more times ({r} in all)", r - repeats));
+            (repeats, repeats_at) = (r, now);
+        }
         for (k, stage) in [&AUDIO, &WORKER].into_iter().enumerate() {
             let since = stage.since.load(Ordering::Relaxed);
             let busy = if since == 0 { 0 } else { now.saturating_sub(since) };

@@ -1,0 +1,74 @@
+diff --git a/crates/skate-host/src/physics/bridge/hud.rs b/crates/skate-host/src/physics/bridge/hud.rs
+index d0685fd..ce2d6a4 100644
+--- a/crates/skate-host/src/physics/bridge/hud.rs
++++ b/crates/skate-host/src/physics/bridge/hud.rs
+@@ -27,6 +27,8 @@ pub struct HudInput {
+     /// Switch, fakie, nollie, (unused) as announced with the trick.
+     pub stance: [bool; 4],
+     pub trick_name: String,
++    /// The scorable identifier behind `trick_name` (e.g. `n_kickflip_underflip`).
++    pub trick_id: &'static str,
+     /// A trick was announced this tick.
+     pub new_trick: bool,
+     /// The current trick converted (e.g. into a combo name) this tick.
+@@ -51,6 +53,7 @@ impl Session {
+             sketchy: view.sketchy,
+             stance: [view.switch, view.fakie, view.nollie, false],
+             trick_name: view.trick_name,
++            trick_id: view.trick_id,
+             new_trick: scoring.new_trick,
+             modified_trick: scoring.modified_trick,
+             close_tricks: scoring.close_tricks,
+diff --git a/crates/skate-host/src/scoring_runtime.rs b/crates/skate-host/src/scoring_runtime.rs
+index bb385c7..a838aae 100644
+--- a/crates/skate-host/src/scoring_runtime.rs
++++ b/crates/skate-host/src/scoring_runtime.rs
+@@ -73,6 +73,8 @@ pub(crate) struct Runtime {
+     sequence_active: bool,
+     sequence_score: f32,
+     trick_name: String,
++    /// SkateV: the announced scorable's identifier (the Trick Analyzer's gesture).
++    trick_id: &'static str,
+     stance: [bool; 4],
+     clean: bool,
+     sketchy: bool,
+@@ -90,6 +92,7 @@ pub struct View {
+     pub multiplier: f32,
+     pub line_timer: f32,
+     pub trick_name: String,
++    pub trick_id: &'static str,
+     pub switch: bool,
+     pub fakie: bool,
+     pub nollie: bool,
+@@ -108,6 +111,7 @@ impl Runtime {
+             multiplier: self.session.combo.multiplier,
+             line_timer: self.session.line.points,
+             trick_name: self.trick_name.clone(),
++            trick_id: self.trick_id,
+             switch: self.stance[0],
+             fakie: self.stance[1],
+             nollie: self.stance[2],
+@@ -145,6 +149,7 @@ impl Runtime {
+             sequence_active: false,
+             sequence_score: 0.,
+             trick_name: String::new(),
++            trick_id: "",
+             stance: [false; 4],
+             clean: false,
+             sketchy: false,
+@@ -269,6 +274,7 @@ impl Runtime {
+                 }
+                 if conversion.is_some() {
+                     self.trick_name = d.label.clone();
++                    self.trick_id = d.identifier;
+                 }
+                 self.carriers[slot] = Some(carrier);
+                 self.sequence_active = true;
+@@ -286,6 +292,7 @@ impl Runtime {
+                     .by_id(c.scorable.id)
+                     .ok_or("Missing announced scorable")?;
+                 self.trick_name = d.label.clone();
++                self.trick_id = d.identifier;
+                 self.stance = [f.switch, f.fakie, f.nollie, false];
+                 self.new_trick = true;
+                 if self.collector == Collector::Air && !self.air_repetition_set {

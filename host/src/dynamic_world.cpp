@@ -54,13 +54,50 @@ std::size_t DynamicWorld::LoadPropTemplates(const std::string& worldCache) {
     return g_props.Models().size();
 }
 
+// Entity position for the pool scan. A native per pooled entity cost ~1 us:
+// with pools enlarged by pool-adjuster mods (1024 objects, peds and cars) that
+// was ~3 ms of GTA's main thread every frame. The entity's matrix translation
+// (+0x90) is checked once against GET_ENTITY_COORDS; on a mismatch the scan
+// stays on the native.
+namespace {
+Vector3 Position(int entity, int& check, std::string& log) {
+    const auto* base = getScriptHandleBaseAddress(entity);
+    if (check == 0 && base) {
+        const Vector3 n = Call<Vector3>(gta::GET_ENTITY_COORDS, entity, 0);
+        const auto* m = reinterpret_cast<const float*>(base + 0x90);
+        const bool same = std::fabs(m[0] - n.x) < 0.01f && std::fabs(m[1] - n.y) < 0.01f && std::fabs(m[2] - n.z) < 0.01f;
+        check = same ? 1 : -1;
+        char line[160];
+        std::snprintf(line, sizeof(line), "dynamic collision: entity position %s (+0x90 %.2f %.2f %.2f, native %.2f %.2f %.2f)",
+                      same ? "read from memory" : "via GET_ENTITY_COORDS (memory read disagrees)", m[0], m[1], m[2], n.x, n.y, n.z);
+        log = line;
+    }
+    if (check == 1 && base) {
+        const auto* m = reinterpret_cast<const float*>(base + 0x90);
+        Vector3 p{};
+        p.x = m[0], p.y = m[1], p.z = m[2];
+        return p;
+    }
+    return Call<Vector3>(gta::GET_ENTITY_COORDS, entity, 0);
+}
+}
+
 bool DynamicWorld::AddBody(int entity, EntityKind kind) {
     if (bodies_.size() >= kMaxBodies) return false;
     if (!Call<BOOL>(gta::DOES_ENTITY_EXIST, entity) || !Call<BOOL>(gta::IS_ENTITY_VISIBLE, entity)) return false;
     if (kind == EntityKind::Object && Call<BOOL>(gta::IS_ENTITY_ATTACHED, entity)) return false;
     const Hash model = Call<Hash>(gta::GET_ENTITY_MODEL, entity);
+    auto [info, fresh] = models_.try_emplace(model);
+    if (fresh) {
+        Vector3 l{}, h{};
+        Call<void>(gta::GET_MODEL_DIMENSIONS, model, &l, &h);
+        info->second = {{l.x, l.y, l.z}, {h.x, h.y, h.z},
+                        kind == EntityKind::Vehicle ? Call<int>(gta::GET_ENTITY_BONE_INDEX_BY_NAME, entity, "bumper_r") : -1};
+    }
+    const ModelInfo& mi = info->second;
     Vector3 lo{}, hi{};
-    Call<void>(gta::GET_MODEL_DIMENSIONS, model, &lo, &hi);
+    lo.x = mi.lo[0], lo.y = mi.lo[1], lo.z = mi.lo[2];
+    hi.x = mi.hi[0], hi.y = mi.hi[1], hi.z = mi.hi[2];
     // The pinned alloc8or DB defines outputs forward, right, up, position.
     // Preserve each basis column's scale for exact local collision templates.
     Vector3 fwd{}, right{}, up{}, pos{};
@@ -102,7 +139,7 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
     if (kind == EntityKind::Vehicle) {
         // Skitch grab line: the rear bumper bone. Bikes and models without
         // bumper_r get no line.
-        const int bone = Call<int>(gta::GET_ENTITY_BONE_INDEX_BY_NAME, entity, "bumper_r");
+        const int bone = mi.bumper;
         if (bone >= 0) {
             const Vector3 g = Call<Vector3>(gta::GET_WORLD_POSITION_OF_ENTITY_BONE, entity, bone);
             if (std::isfinite(g.x) && std::isfinite(g.y) && std::isfinite(g.z)) {
@@ -114,8 +151,15 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
     bool isDoor = false, unlocked = false;
     if (kind == EntityKind::Object) {
         // Open unlocked doors, but retain their moving exact collision when a template exists.
-        Hash door = 0;
-        isDoor = Call<BOOL>(gta::DOOR_SYSTEM_FIND_EXISTING_DOOR, pos.x, pos.y, pos.z, model, &door) && door;
+        DoorRef& ref = doorRefs_[entity];
+        const float mx = ref.at.x - pos.x, my = ref.at.y - pos.y, mz = ref.at.z - pos.z;
+        if (ref.model != model || mx * mx + my * my + mz * mz > 0.25f) {
+            Hash found = 0;
+            const bool any = Call<BOOL>(gta::DOOR_SYSTEM_FIND_EXISTING_DOOR, pos.x, pos.y, pos.z, model, &found) && found;
+            ref = {model, {pos.x, pos.y, pos.z}, any ? static_cast<std::uint32_t>(found) : 0u};
+        }
+        const Hash door = ref.door;
+        isDoor = door != 0;
         unlocked = isDoor && PropCollisionIndex::DoorMayOpen(Call<int>(gta::DOOR_SYSTEM_GET_DOOR_STATE, door));
         if (unlocked) {
             doors_.push_back({door, {pos.x, pos.y, pos.z}, {fwd.x, fwd.y, fwd.z}});
@@ -143,6 +187,7 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
 }
 
 void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentationEntity) {
+    if (doorRefs_.size() > 4096) doorRefs_.clear(); // handles of long-gone objects
     bodies_.clear();
     parts_.clear();
     debris_.clear();
@@ -157,10 +202,11 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentatio
     nearby.clear();
     auto collect = [&](int (*pool)(int*, int), EntityKind kind, float kindRadius2) {
         const int n = pool(scratch_.data(), kPoolScratch);
+        stats_.pooled += static_cast<std::uint32_t>(n);
         for (int i = 0; i < n; ++i) {
             const int e = scratch_[i];
             if (e == self || e == presentationEntity) continue;
-            const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, e, 0);
+            const Vector3 p = Position(e, positionCheck_, positionLog_);
             const float d2 = Dist2(p, center);
             if (d2 <= kindRadius2) nearby.push_back({d2, e, kind});
         }

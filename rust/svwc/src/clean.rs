@@ -2,7 +2,7 @@
 //! and the live collision reader (`skatev-runtime::live`): both must leave the
 //! same collision behind, so the rules live here once.
 use crate::Tri;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Soft vegetation GTA authors as volumes or foliage meshes: bush and grass
 /// clumps (GRASS_LONG, GRASS, GRASS_SHORT, BUSHES, TWIGS, LEAVES; HAY bales
@@ -29,7 +29,7 @@ pub fn drop_repeats(tris: &mut Vec<Tri>) -> usize {
     let same = |a: &Tri, b: &Tri| {
         (0..3).any(|r| (0..3).all(|i| (0..3).all(|k| (a.v[i][k] - b.v[(i + r) % 3][k]).abs() < TOL)))
     };
-    let mut blocks: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+    let mut blocks: HashMap<(i32, i32), Vec<u32>> = HashMap::default();
     for (i, t) in tris.iter().enumerate() {
         let c = centroid(t);
         if c.iter().all(|x| x.is_finite()) {
@@ -40,7 +40,7 @@ pub fn drop_repeats(tris: &mut Vec<Tri>) -> usize {
     for ids in blocks.values() {
         // Centroids within TOL of each other: the same 2*TOL cell, or the
         // neighbour on the side the centroid is nearer to (8 cells).
-        let mut cells: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+        let mut cells: HashMap<[i32; 3], Vec<u32>> = HashMap::default();
         for &i in ids {
             let c = centroid(&tris[i as usize]).map(|x| x / (2.0 * TOL));
             let base = c.map(|x| x.floor() as i32);
@@ -153,7 +153,7 @@ const GAP: f32 = 1.0;
 /// out; surfaces it lacks (owner 2026-10-07: a rooftop wall's top) come in.
 /// Returns how many were added.
 pub fn fill_gaps(tris: &mut Vec<Tri>, extra: Vec<Tri>) -> usize {
-    let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+    let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::default();
     for (i, t) in tris.iter().enumerate() {
         if !t.v.iter().flatten().all(|x| x.is_finite()) {
             continue;
@@ -202,7 +202,7 @@ fn centroid(t: &Tri) -> [f32; 3] {
 pub fn drop_over_ground(tris: &mut Vec<Tri>) -> usize {
     let solid = hedges(tris);
     // Only cells under foliage need floors.
-    let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+    let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::default();
     for t in tris.iter().filter(|t| soft_vegetation(t.material)) {
         let c = centroid(t);
         grid.entry(((c[0] / CELL).floor() as i32, (c[1] / CELL).floor() as i32)).or_default();
@@ -265,7 +265,7 @@ fn hedges(tris: &[Tri]) -> Vec<bool> {
         i
     }
     let mut parent: Vec<usize> = (0..tris.len()).collect();
-    let mut corners: HashMap<[u32; 3], usize> = HashMap::new();
+    let mut corners: HashMap<[u32; 3], usize> = HashMap::default();
     for (i, t) in tris.iter().enumerate().filter(|(_, t)| soft_vegetation(t.material)) {
         for v in t.v {
             let j = *corners.entry(v.map(f32::to_bits)).or_insert(i);
@@ -274,7 +274,7 @@ fn hedges(tris: &[Tri]) -> Vec<bool> {
         }
     }
     // Per mesh: bounds, and whether every triangle faces up.
-    let mut bounds: HashMap<usize, ([f32; 3], [f32; 3], bool)> = HashMap::new();
+    let mut bounds: HashMap<usize, ([f32; 3], [f32; 3], bool)> = HashMap::default();
     for (i, t) in tris.iter().enumerate().filter(|(_, t)| soft_vegetation(t.material)) {
         let b = bounds.entry(root(&mut parent, i)).or_insert(([f32::MAX; 3], [f32::MIN; 3], true));
         for v in t.v {

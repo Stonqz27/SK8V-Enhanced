@@ -1,6 +1,7 @@
 #include "stall_sampler.h"
 #include "image_code_ranges.h"
 #include "host_util.h"
+#include "thread_census.h"
 #include <windows.h>
 #include <psapi.h>
 #include <winternl.h>
@@ -211,6 +212,7 @@ void Report(double stallMs, int& logged) {
 }
 
 DWORD WINAPI Watchdog(LPVOID) {
+    threadcensus::Name(L"skatev-stall-watchdog");
     RefreshModules();
     std::int64_t nextRefresh = Now();
     std::int64_t stallBeat = 0; // the beat a stall is being sampled for

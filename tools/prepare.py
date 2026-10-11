@@ -33,7 +33,7 @@ RPF = 'sk8v-rpf.exe'
 STEPS = {'disc': (20, 'Reading the Skate 3 disc'), 'convert': (17, 'Converting Skate 3 data'),
          'audio': (17, 'Converting Skate 3 audio'), 'audio-tuning': (1, 'Reading audio tuning'),
          'hom-hud': (5, 'Preparing the Hall of Meat HUD'), 'hom-xray': (1, 'Preparing the x-ray view'),
-         'board': (1, 'Preparing the board'), 'gta-vehicles': (3, 'Reading GTA V vehicles'),
+         'board': (1, 'Preparing the board'), 'trick-analyser': (1, 'Preparing the Trick Analyzer'), 'gta-vehicles': (3, 'Reading GTA V vehicles'),
          'world': (30, 'Building world collision'), 'peds': (5, 'Reading GTA V characters'), 'live-clip': (4, 'Building the board animation pack'),
          'wheel-icon': (2, 'Adding the weapon wheel icon'), 'board-native': (3, 'Building the GTA board model'),
          'ped-colliders': (2, 'Building character collision'), 'verify': (1, 'Checking the prepared data'),
@@ -97,6 +97,8 @@ class Prepare:
             ('hom-hud', 'skate', ['prepare-hom-hud.py'], self.stage_hom_hud),
             ('hom-xray', 'skate', ['prepare-hom-xray.py'], lambda: py('prepare-hom-xray.py', '--game', self.disc, '--assets', self.assets)),
             ('board', 'skate', ['prepare-board.py'], lambda: py('prepare-board.py', '--assets', self.assets)),
+            ('trick-analyser', 'skate', ['prepare-hom-hud.py'], lambda: py(
+                'prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets, '--movie', 'trickanalyser')),
             ('board-native', 'join', ['prepare-board-native.py'], self.stage_board_native),
             ('ped-colliders', 'join', ['prepare-ped-colliders.py', 'ped_collider_templates.py'], self.stage_ped_colliders),
             ('gta-vehicles', 'gta', ['gta_extract.py', 'build-vehicle-masses.py'], self.stage_vehicles),
@@ -172,8 +174,25 @@ class Prepare:
         py('build-board-weapon.py', ai / 'weapons.meta', ai / 'weaponanimations.meta', self.clip / 'weapon')
         exe('live_clip.exe', self.peds, self.clip, self.clip / 'live_clip_layout.h')
 
+    def hud_mod(self):
+        """OpenIV's copy of update.rpf when OpenIV.asi loads the mods folder: the
+        hud.gfx GTA runs (a radio or HUD mod's), which SK8V's then replaces."""
+        rpf = self.gta / 'mods/update/update.rpf'
+        return rpf if rpf.is_file() and (self.gta / 'OpenIV.asi').is_file() else None
+
     def stage_icon(self):
-        hud = self.work / 'hud'
+        hud, mod = self.work / 'hud', self.hud_mod()
+        if mod:
+            shutil.rmtree(self.work / 'hud-mods', ignore_errors=True)
+            try:
+                gta_extract.extract(binary(RPF), self.keys, mod, ['*scaleform_generic.rpf/hud.gfx'], self.work / 'hud-mods')
+            except gta_extract.ExtractError as e:  # an unreadable mods copy: GTA's own
+                print(f"mods folder hud.gfx not read, using GTA's: {e}", flush=True)
+            found = next((self.work / 'hud-mods').rglob('hud.gfx'), None)
+            if found:
+                print(f"board icon added to the mods folder's hud.gfx ({mod})", flush=True)
+                py('build-board-icon.py', '--source', found, '--out', self.clip / 'hud.gfx')
+                return
         gta_extract.extract(binary(RPF), self.keys, self.gta / 'update/update.rpf', ['*scaleform_generic.rpf/hud.gfx'], hud)
         py('build-board-icon.py', '--source', next(hud.rglob('hud.gfx')), '--out', self.clip / 'hud.gfx')
 
@@ -213,11 +232,18 @@ class Prepare:
             raise SystemExit('prepared data incomplete:\n  ' + '\n  '.join(missing[:20]))
 
     # Receipts
-    def key(self, scripts):
+    def key(self, scripts, extra=''):
         h = hashlib.sha256(json.dumps([str(self.a.skate), str(self.gta)]).encode())
         for s in scripts:
             h.update(sha256_file(TOOLS / s).encode())
+        h.update(extra.encode())
         return h.hexdigest()
+
+    def input_key(self, name):
+        """What a stage reads beyond the disc and GTA's own archives: a HUD mod
+        installed or changed after setup rebuilds the board's hud.gfx."""
+        mod = self.hud_mod() if name == 'wheel-icon' else None
+        return f'{mod.stat().st_size}:{mod.stat().st_mtime_ns}' if mod else ''
 
     def run(self):
         self.receipts.mkdir(parents=True, exist_ok=True)
@@ -241,13 +267,15 @@ class Prepare:
         --redo), everything after it in the chain reruns. True if any ran."""
         ran = False
         for name, _, scripts, fn in stages:
-            receipt, key = self.receipts / f'{name}.json', self.key(scripts)
+            receipt, key = self.receipts / f'{name}.json', self.key(scripts, self.input_key(name))
             force = force or name == self.a.redo
             if not force and receipt.exists() and json.loads(receipt.read_text())['key'] == key:
                 self.step(name)
                 continue
             if setup_engine.gta_running():  # reads GTA's archives; never compete with the game for them
                 raise SystemExit(f'GTA V started: stopped before {name}; rerun to resume')
+            if stages[0][0] == 'disc' and name != 'disc' and not (self.disc / 'default.xex').is_file():
+                self.stage_disc()  # --clean removed the disc extraction; the stages before this one stay done
             label = STEPS.get(name, (1, name))[1]
             self.running[name] = label
             print(f'== {name}: {label}', flush=True)
@@ -312,8 +340,8 @@ def main():
         print(f'== install: {STEPS["install"][1]}', flush=True)
         setup_engine.install(a.gta, p.plan())
         p.step('install')
-    if a.clean:  # the extractions (about 5 GB); a later run starts over
-        for d in (p.work, p.receipts) + (() if a.skate.is_dir() else (p.disc,)):
+    if a.clean:  # the extractions (about 5 GB); the receipts stay, so a rerun does only new or changed stages
+        for d in (p.work,) + (() if a.skate.is_dir() else (p.disc,)):
             shutil.rmtree(d, ignore_errors=True)
 
 

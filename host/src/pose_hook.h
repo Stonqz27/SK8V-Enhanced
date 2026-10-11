@@ -48,4 +48,12 @@ bool FadeOutDone();
 // animates the ped once it runs its own tasks, so the live clip must be off
 // while this is on. Script thread.
 void SetGun(bool on, int ms);
+
+// Time the pose writes took since the last call: on GTA's main thread (the
+// ped's animation pass) and on its anim workers, which the frame waits for.
+struct ApplyTime {
+    double mainMs, workerMs;
+    unsigned calls;
+};
+ApplyTime TakeApplyTime();
 } // namespace posehook

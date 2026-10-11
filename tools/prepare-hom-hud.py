@@ -5,6 +5,8 @@ user's own game files into the converted data root.
     python tools/prepare-hom-hud.py --game Skate_3 --assets local/skate-data/assets \
         --movie chyron --hud-ytd <hud.ytd>
 
+`--movie trickanalyser` prepares the Trick Analyzer (the gesture of the last
+trick) into `private/hud-analyser`, with the gesture_item control merged in.
 `--movie chyron` prepares Skate's TRAX now-playing banner (GTA's radio on
 the board) into `private/hud-chyron`; with `--hud-ytd` (GTA's HUD atlas
 `update.rpf/.../scaleform_generic.rpf/hud.ytd`, extracted by tools/prepare.py)
@@ -21,7 +23,8 @@ copyrighted assets and stays private (never commit or publish it).
 
 One adaptation: the donor VM has no ToString (APT opcode 0x4B). Each one is
 rewritten as `push ""` + `add` at the same offset, which converts the value
-the same way (ActionScript string concatenation).
+the same way (ActionScript string concatenation). Trace (0x26, debug output) becomes
+Pop, which drops its argument the same way.
 """
 from pathlib import Path
 import argparse
@@ -48,12 +51,80 @@ MANIFEST = 'runtime/homscoring.json'
 MOVIES = {
     'homscoring': (BUNDLE, MANIFEST, 'hud-hom'),
     'chyron': ('data/fe/source/screens/main/chyron', 'runtime/chyron.json', 'hud-chyron'),
+    'trickanalyser': ('data/fe/source/screens/hud2/trickanalyser', 'runtime/trickanalyser.json', 'hud-analyser'),
 }
+
+# The Trick Analyzer imports `Gesture Item` (its character 6) from this
+# control, whose script attachMovie()s the trick's `g_<gesture>` clip into its
+# placeholder. The HUD VM has no attachMovie, so the import is merged in:
+# Gesture Item's characters move up by GESTURE_SHIFT, character 6 becomes its
+# copy, and the empty clip its SetGestureType creates (`gesture`, depth 2, at
+# the item's origin; the placeholder stays hidden) is a stopped sprite with
+# one labelled frame per g_ clip, which the runtime's SetGestureType seeks,
+# and one more per clip mirrored (`<name>_mirrored`): the script sets
+# `_xscale = -100` while the rider stands goofy, which the VM does not read.
+GESTURES = 'data/fe/source/controls/gesture_item'
+GESTURE_SHIFT = 1000
+GESTURE_ITEM, GESTURE_IMPORT, PICKER = 135, 6, 2000
+STOP_ACTION = 3428  # trickanalyser's own `stop()` block
+
+
+def shifted(c):
+    c = json.loads(json.dumps(c))
+    c['id'] += GESTURE_SHIFT
+    if c.get('text'):
+        c['text']['font_id'] += GESTURE_SHIFT
+    for f in c.get('frames', []):
+        f['controls'] = [k for k in f['controls'] if k['type_name'] not in ('do_action', 'do_init_action')]
+        for k in f['controls']:
+            if k['type_name'].startswith('place_object') and k['flags'] & 2:
+                k['character_id'] += GESTURE_SHIFT
+    return c
+
+
+def merge_gestures(bundle, gestures):
+    """Returns {character id: (bundle, id there)} for the merged characters."""
+    origin = {}
+    for c in gestures['characters'].values():
+        if c['id'] == 0:  # gesture_item's own root
+            continue
+        m = shifted(c)
+        origin[m['id']] = (GESTURES, c['id'])
+        bundle['characters'][m['id']] = m
+    # Two placements carry component parameters as clip actions
+    # (`_type = "trickanalyzer"`, `mGestureImage = "ollie"`), which only the
+    # replaced gesture_item script read; the VM has no clip actions.
+    for c in bundle['characters'].values():
+        for f in c.get('frames', []):
+            for k in f['controls']:
+                if k['type_name'].startswith('place_object') and k['flags'] & 0x80:
+                    k['flags'] &= ~0x80
+                    k['actions_offset'] = 0
+    item = shifted(gestures['characters'][GESTURE_ITEM])
+    item['id'] = GESTURE_IMPORT
+    item['frames'][0]['controls'].append({
+        'type_name': 'place_object2', 'flags': 0x26, 'depth': 2, 'character_id': PICKER,
+        'matrix': [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 'name': 'gesture'})
+    bundle['characters'][GESTURE_IMPORT] = item
+    stop = {'type_name': 'do_action', 'actions_offset': STOP_ACTION}
+    frames = [{'controls': [{'type_name': 'frame_label', 'label': 'none'}, stop]}]
+    for name, cid in gestures['exports'].items():
+        if not name.startswith('g_'):
+            continue
+        for label, sx in ((name, 1.0), (name + '_mirrored', -1.0)):
+            frames.append({'controls': [
+                {'type_name': 'frame_label', 'label': label},
+                {'type_name': 'place_object2', 'flags': 6, 'depth': 1, 'character_id': cid + GESTURE_SHIFT,
+                 'matrix': [sx, 0.0, 0.0, 1.0, 0.0, 0.0]},
+                stop]})
+    bundle['characters'][PICKER] = {'id': PICKER, 'type_name': 'sprite', 'frames': frames}
+    return origin
 
 
 def rewrite_to_string(code):
-    """Replace ToString (0x4B) with push "" + add, keeping offsets (jump
-    targets resolve to the first instruction at an offset)."""
+    """Replace ToString (0x4B) with push "" + add, and Trace (0x26) with Pop,
+    keeping offsets (jump targets resolve to the first instruction at an
+    offset)."""
     out = []
     for row in code:
         if row.get('body'):
@@ -61,6 +132,8 @@ def rewrite_to_string(code):
         if row['opcode'] == 0x4B:
             out.append({'offset': row['offset'], 'opcode': 0xA1, 'operand': '', 'next': row['offset']})
             out.append({'offset': row['offset'], 'opcode': 0x47, 'next': row['next']})
+        elif row['opcode'] == 0x26:  # the Trick Analyzer's registration trace
+            out.append(dict(row, opcode=0x17))
         else:
             out.append(row)
     return out
@@ -68,10 +141,12 @@ def rewrite_to_string(code):
 
 def prepare(game: Path, work: Path, collections: Path, bundle: str = BUNDLE, manifest: str = MANIFEST) -> Path:
     BUNDLE, MANIFEST = bundle, manifest
-    extract_project(game, work, prefixes=(BUNDLE,), update=True)
+    analyser = BUNDLE == MOVIES['trickanalyser'][0]
+    extract_project(game, work, prefixes=(BUNDLE, GESTURES) if analyser else (BUNDLE,), update=True)
     cache = AssetCache(work)
     mappings = font_mapping(collections, cache)
     bundle = cache.load_bundle(BUNDLE)
+    origin = merge_gestures(bundle, cache.load_bundle(GESTURES)) if analyser else {}
     apt_path = work / 'raw' / (BUNDLE + '.apt')
     const_path = apt_path.with_suffix('.const')
     actions = Actions(apt_path.read_bytes(), const_path.read_bytes())
@@ -79,13 +154,13 @@ def prepare(game: Path, work: Path, collections: Path, bundle: str = BUNDLE, man
     for c in bundle['characters'].values():
         for f in c.get('frames', []):
             for control in f['controls']:
-                if control['type_name'] in ('do_action', 'do_init_action') and control.get('actions_offset'):
+                if control['type_name'] in ('do_action', 'do_init_action') and control.get('actions_offset')                         and str(control['actions_offset']) not in blocks:
                     offset = control['actions_offset']
                     blocks[str(offset)] = rewrite_to_string(actions.stream(offset))
     shapes, fonts = {}, {}
     for c in bundle['characters'].values():
         if c['type_name'] == 'shape':
-            scene = SceneFlattener(cache, lambda *_: {}).flatten(BUNDLE, c['id'])
+            scene = SceneFlattener(cache, lambda *_: {}).flatten(*origin.get(c['id'], (BUNDLE, c['id'])))
             if scene['unresolved']:
                 raise ValueError(f"Unresolved HoM HUD shape: {scene['unresolved']}")
             # Untextured `line` primitives are authoring guides (chyron's

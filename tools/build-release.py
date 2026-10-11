@@ -137,8 +137,21 @@ def main():
             if p.is_file():
                 z.write(p, Path(out.name) / p.relative_to(out))
     print(f'{len(shipped) + 1} files -> {archive} ({archive.stat().st_size / 2**20:.0f} MB)')
+    symbols(a.version)
     if a.update:
         update(out, a.version)
+
+
+def symbols(version):
+    """The shipped binaries and their .pdb files in local/symbols/<version> (not shipped): players' crash
+    dumps only resolve against the exact build they ran (cdb -y local/symbols/<version>)."""
+    dest = REPO / 'local/symbols' / version
+    for src in ['build/package/SkateVLegacy.asi', 'build/package/SkateVRuntime.dll',
+                'build/host/host/Release/SkateVLegacy.pdb', 'rust/target/release/SkateVRuntime.pdb']:
+        if (REPO / src).is_file():
+            copy(REPO / src, dest / Path(src).name)
+        else:
+            print(f'symbols: {src} missing; dumps from this build will not resolve it')
 
 
 def update(out, version):

@@ -1,6 +1,6 @@
 # Building SK8V Enhanced
 
-Target: GTA V Enhanced **1.0.1158.16**. Base: SK8V **1.0.9 / 15b9a3b**. Building source does not install or alter GTA.
+Target: GTA V Enhanced **1.0.1158.16**. Base: SK8V **1.1.8 / 9fbef44**. Building source does not install or alter GTA.
 
 ## Toolchain
 
@@ -21,15 +21,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-rust.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-enhanced-host.ps1 -ProbeMode Gameplay
 ```
 
-Pinned engine sources remain in `upstream/`; 44 project patches are applied to `build/overlay/skate/`. Outputs:
+Pinned engine sources remain in `upstream/`; 49 project patches are applied to `build/overlay/skate/`. Outputs:
 
 - `build/enhanced-gameplay-package/SkateVEnhanced.asi`
 - `build/enhanced-gameplay-package/SK8VHudBridge.addon64`
 - `build/runtime/SkateVRuntime.dll`
 
-The public checkout runs six C++ checks without retail fixtures. Optional image/body audits require the developer's own ignored `port-evidence/` files; the slower runtime smoke executable needs locally converted data. See [validation](docs/VALIDATION.md).
+The [1.1.8 upgrade notes](docs/UPSTREAM-1.1.8.md) list preparation changes and unported visuals. Build and deploy the host and runtime as a matching pair.
+
+The public checkout runs seven C++ checks without retail fixtures. Optional image/body audits require the developer's own ignored `port-evidence/` files; the slower runtime smoke executable needs locally converted data. See [validation](docs/VALIDATION.md).
 
 `BUILD.bat` / `tools/build-host.ps1` select Enhanced gameplay. Diagnostic modes remain explicit: Animation, Resources, Graphics or Audio. They cannot be mixed with gameplay.
+
+Rust regression checks:
+
+```powershell
+cargo test --manifest-path rust/Cargo.toml --release --locked -p skatev-runtime -p skate-hud -p svwc --lib
+```
 
 ## Graphics dependency
 

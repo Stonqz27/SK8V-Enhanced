@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "host_util.h"
+#include "thread_census.h"
 
 namespace physlevel {
 namespace {
@@ -167,6 +168,7 @@ void Report(std::uintptr_t table) {
 }
 
 void Worker(std::vector<std::uint64_t> insts) {
+    threadcensus::Name(L"skatev-level-scan");
     const double t0 = NowMs();
     const std::uintptr_t base = Locate(std::move(insts));
     if (!base) {

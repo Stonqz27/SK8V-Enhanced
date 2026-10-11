@@ -26,6 +26,11 @@ pub struct Area {
     pub bevels: curbs::BevelCensus,
     /// Where the triangles came from (live physics level census), for the log.
     pub note: String,
+    /// GTA's bounds the triangles were read from (`live::changed_near`).
+    pub bounds: Vec<crate::live::Seen>,
+    /// Triangles new or gone since the last build (`reuse`); None: built
+    /// from scratch.
+    pub changed: Option<usize>,
 }
 
 pub struct StaticWorld {
@@ -36,13 +41,26 @@ pub struct StaticWorld {
     /// GTA's own loaded collision (`live.rs`), once the host has found it;
     /// until then no area can be built.
     live: Option<crate::live::Level>,
+    /// What the last build found, reused where nothing nearby changed.
+    reuse: crate::reuse::AreaCache,
+    /// The sidecar reads (recovered surfaces, ground joints) depend on the
+    /// centre only: kept for rebuilds in place.
+    sidecars_at: Option<[f32; 2]>,
+    recovered_area: std::collections::HashMap<u64, svwc::surfaces::Surface>,
 }
 
 impl StaticWorld {
     /// `path` names the cache the sidecars sit beside; the cache itself is
     /// not read.
     pub fn open(path: &Path) -> Self {
-        Self { recovered: crate::surfaces::Recovered::open(path), ground: crate::ground::GroundSource::open(path), live: None }
+        Self {
+            recovered: crate::surfaces::Recovered::open(path),
+            ground: crate::ground::GroundSource::open(path),
+            live: None,
+            reuse: Default::default(),
+            sidecars_at: None,
+            recovered_area: Default::default(),
+        }
     }
 
     /// Where GTA's loaded collision is (None: it is not available).
@@ -64,13 +82,21 @@ impl StaticWorld {
     /// collision (which already holds whatever map states are active).
     pub fn around(&mut self, center: Vec3) -> Result<Area, String> {
         let level = self.live.ok_or("GTA's loaded collision (its physics level) has not been found yet")?;
-        let (tris, census) = level.walk([center.x, center.y], RADIUS)?;
+        let read = std::time::Instant::now();
+        let (tris, census, bounds) = level.walk([center.x, center.y], RADIUS)?;
+        let walked = read.elapsed();
         let mut note = census.to_string();
         let p = [center.x, center.y];
         if !tris.iter().any(|t| svwc::clean::floor_at(t, p).is_some_and(|z| (z - center.z).abs() < 4.0)) {
             note.push_str(&format!("; NO FLOOR under ({:.1}, {:.1}, {:.1}): {}", p[0], p[1], center.z, level.under(p).unwrap_or_else(|e| e)));
         }
-        let recovered = self.recovered.around([center.x, center.y], RADIUS)?;
+        let in_place = self.sidecars_at == Some(p);
+        if !in_place {
+            self.recovered_area = self.recovered.around(p, RADIUS)?;
+            crate::ground::publish(self.ground.around(p, RADIUS)?);
+            self.sidecars_at = Some(p);
+        }
+        let recovered = &self.recovered_area;
         if self.recovered.is_loaded() {
             let matched = tris.iter().filter(|t| recovered.contains_key(&svwc::surfaces::key(&t.v))).count();
             note.push_str(&format!("; surface records matched {matched} of {} triangles", tris.len()));
@@ -81,12 +107,25 @@ impl StaticWorld {
                 recovered.get(&svwc::surfaces::key(&t.v)).map(|r| (t.v, r.families))
             })));
         }
-        crate::ground::publish(self.ground.around([center.x, center.y], RADIUS)?);
-        let mut area = build_area_tagged(
+        crate::ground_at::publish(crate::ground_at::GroundIndex::build(tris.iter().map(|t| (t.v, t.material))));
+        let (read, build) = (read.elapsed(), std::time::Instant::now());
+        let mut area = build_area_reusing(
             center,
             tris.iter().map(|t| (t.v, crate::surfaces::tag(t.material, recovered.get(&svwc::surfaces::key(&t.v))))),
+            &mut self.reuse,
         );
+        if let Some(n) = area.changed {
+            note.push_str(&format!("; {n} triangles changed since the last build, the rest reused"));
+        }
+        note.push_str(&format!(
+            "; read {} ms (GTA's bounds {} ms{}), built {} ms",
+            read.as_millis(),
+            walked.as_millis(),
+            if in_place { ", sidecars kept" } else { "" },
+            build.elapsed().as_millis()
+        ));
         area.note = note;
+        area.bounds = bounds;
         Ok(area)
     }
 }
@@ -102,23 +141,34 @@ pub fn build_area_materials(center: Vec3, tris: impl Iterator<Item = ([[f32; 3];
 
 /// As `build_area_materials`, with each triangle's audio tag already chosen.
 pub fn build_area_tagged(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32)>) -> Area {
+    build_area_reusing(center, tris, &mut crate::reuse::AreaCache::default())
+}
+
+/// As `build_area_tagged`, redoing the rails, bevels and ply filters only
+/// where the triangles changed since the build `cache` holds (`reuse`); the
+/// result is the same as a build from scratch.
+pub fn build_area_reusing(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32)>, cache: &mut crate::reuse::AreaCache) -> Area {
     let (gta, surfaces): (Vec<[Vec3; 3]>, Vec<u32>) = tris
         .map(|(t, tag)| (t.map(Vec3::from_array), tag))
         .filter(|(p, _)| p.iter().all(|v| v.is_finite())
             && (p[1] - p[0]).cross(p[2] - p[0]).length_squared() > 1e-10)
         .unzip();
-    let (found, census) = rails::find_metres(&gta);
+    let (dirty, keys) = cache.diff(&gta);
+    let (found, census) = rails::find_metres_reusing(&gta, &dirty, &mut cache.rails);
     let grid = crate::grid::XyGrid::triangles(curbs::CELL, &gta);
-    let curbs::Bevels { triangles: bevel_tris, sources, buried, census: bevels } = curbs::bevels_with_sources(&gta, &grid);
+    let curbs::Bevels { triangles: bevel_tris, sources, buried, census: bevels } = curbs::bevels_reusing(&gta, &grid, &dirty, &mut cache.curbs);
+    // The ply filters' answers, and the keys of what they dropped for the next build.
+    let set = |found: &[usize]| found.iter().map(|&i| keys[i]).collect::<rustc_hash::FxHashSet<u64>>();
+    let interior = crate::plies::interior_reusing(&gta, &grid, |i, pad| dirty.kept(&gta[i], keys[i], pad, &cache.interior));
+    cache.interior = set(&interior);
+    let caps = crate::plies::abutting_caps_reusing(&gta, |i, pad| dirty.kept(&gta[i], keys[i], pad, &cache.caps));
+    cache.caps = set(&caps);
+    let solids = crate::plies::buried_faces_reusing(&gta, |i, pad| dirty.kept(&gta[i], keys[i], pad, &cache.buried));
+    cache.buried = set(&solids);
     // Rails were found on the full GTA set; buried risers then leave the
     // collision (their bevels cover them).
     let mut keep = vec![true; gta.len()];
-    for &i in buried
-        .iter()
-        .chain(&crate::plies::interior(&gta, &grid))
-        .chain(&crate::plies::abutting_caps(&gta))
-        .chain(&crate::plies::buried_faces(&gta))
-    {
+    for &i in buried.iter().chain(&interior).chain(&caps).chain(&solids) {
         keep[i] = false;
     }
     let mut collision: Vec<([Vec3; 3], u32)> = gta
@@ -145,6 +195,8 @@ pub fn build_area_tagged(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3]
         census,
         bevels,
         note: String::new(),
+        bounds: Vec::new(),
+        changed: dirty.compared().then_some(dirty.changed),
     }
 }
 

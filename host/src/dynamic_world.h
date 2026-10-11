@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 enum class EntityKind : std::uint32_t { Vehicle = 0, Ped = 1, Object = 2 };
@@ -14,6 +15,7 @@ struct DynamicWorldStats {
     std::uint32_t vehicles = 0, peds = 0, objects = 0, hits = 0, debris = 0, doors = 0;
     std::uint32_t exactBounds = 0, missingBounds = 0, exchanged = 0;
     std::uint32_t pedParts = 0, pedImpulses = 0; // peds sent as ragdoll parts; impulses applied to peds
+    std::uint32_t pooled = 0; // entities the pool scan looked at
 };
 
 // GTA's own crime system for what the held skater does (board hits and
@@ -62,6 +64,8 @@ public:
     }
     const std::vector<SvPedPart>& PedParts() const { return parts_; }
     const DynamicWorldStats& Stats() const { return stats_; }
+    // The one-time position read check's result, once (empty after).
+    std::string TakePositionLog() { return std::exchange(positionLog_, {}); }
     // Load exact template index and baked INSTANCE transforms beside cache.
     // Legacy model-only .props.txt is deliberately not used for suppression.
     static std::size_t LoadPropTemplates(const std::string& worldCache);
@@ -72,6 +76,8 @@ public:
 
 private:
     bool AddBody(int entity, EntityKind kind);
+    int positionCheck_ = 0; // 0 unchecked, 1 memory, -1 native
+    std::string positionLog_;
     struct Debris { int entity; SvVec3 center; };
     struct Candidate { float d2; int entity; EntityKind kind; };
     std::vector<Candidate> nearby_;
@@ -79,6 +85,14 @@ private:
     std::vector<Debris> debris_;
     struct Door { std::uint32_t hash; SvVec3 hinge; SvVec3 forward; };
     std::vector<Door> doors_;
+    // Fixed per model: GTA's model bounds and the bumper_r bone (-1: none),
+    // looked up once rather than every gather.
+    struct ModelInfo { float lo[3], hi[3]; int bumper; };
+    std::unordered_map<std::uint32_t, ModelInfo> models_;
+    // Per object entity: the door system's door at its spot (0: none) and
+    // where it was looked up; a reused handle or a moved entity looks again.
+    struct DoorRef { std::uint32_t model; SvVec3 at; std::uint32_t door; };
+    std::unordered_map<int, DoorRef> doorRefs_;
     std::vector<int> scratch_;
     std::unordered_map<std::uint32_t, unsigned long> cooldown_;
     bool exchange_ = false;

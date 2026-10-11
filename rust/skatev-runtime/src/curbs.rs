@@ -18,7 +18,7 @@
 //!   into a kicker at 8.75 m/s (`evidence/2026-10-02/surface-detail.md`).
 use crate::grid::{height, XyGrid};
 use bevy_math::Vec3;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Smallest and largest step that gets a bevel (metres).
 pub const MIN_STEP: f32 = 0.015;
@@ -78,15 +78,38 @@ fn toe_profile(p: Vec3, out_xy: bevy_math::Vec2, outward_grade: f32, ground_grad
 /// Cell of the area grid curbs and plies share (`XyGrid::triangles`).
 pub const CELL: f32 = 2.0;
 
+/// Per triangle, for `ground`: upward facing, and its height span widened by
+/// what `height` may reach outside it (1e-4 of the corners' spread).
+struct Floors {
+    span: Vec<(f32, f32)>,
+}
+
+impl Floors {
+    fn new(tris: &[[Vec3; 3]]) -> Self {
+        let span = tris
+            .iter()
+            .map(|&[a, b, c]| {
+                if (b - a).cross(c - a).z <= 0.0 {
+                    return (f32::MAX, f32::MIN); // never a floor
+                }
+                let (lo, hi) = (a.z.min(b.z).min(c.z), a.z.max(b.z).max(c.z));
+                let pad = 1e-3 + 1e-3 * (hi - lo);
+                (lo - pad, hi + pad)
+            })
+            .collect();
+        Self { span }
+    }
+}
+
 /// Highest upward surface under (x, y) between `below` and `above`.
-fn ground(grid: &XyGrid, tris: &[[Vec3; 3]], x: f32, y: f32, below: f32, above: f32) -> Option<f32> {
+fn ground(grid: &XyGrid, floors: &Floors, tris: &[[Vec3; 3]], x: f32, y: f32, below: f32, above: f32) -> Option<f32> {
     let mut best: Option<f32> = None;
     for &i in grid.at(x, y) {
-        let t = &tris[i as usize];
-        let [a, b, c] = *t;
-        if (b - a).cross(c - a).z <= 0.0 {
+        let (lo, hi) = floors.span[i as usize];
+        if hi < below || lo > above || best.is_some_and(|b| hi <= b) {
             continue;
         }
+        let t = &tris[i as usize];
         let Some(z) = height(t, x, y) else { continue };
         if z >= below && z <= above && best.is_none_or(|b| z > b) {
             best = Some(z);
@@ -109,6 +132,7 @@ pub struct BevelCensus {
 
 /// The solid a bevel piece and the top behind it cover: a vertical slab
 /// under the bevel surface (outward) and under the top (inward, `BEHIND`).
+#[derive(Clone, Copy)]
 struct Cover {
     p0: Vec3,
     p1: Vec3,
@@ -162,17 +186,43 @@ pub struct Bevels {
     pub census: BevelCensus,
 }
 
+/// What each top edge gave last build (`reuse`): its bevel triangles and
+/// covers, and how it counted (bevel pieces, slopes, curbs).
+#[derive(Default)]
+pub struct CurbCache {
+    edges: HashMap<u64, Gave>,
+    triangles: Vec<[Vec3; 3]>,
+    covers: Vec<Cover>,
+}
+
+#[derive(Clone, Copy)]
+struct Gave {
+    triangles: (u32, u32),
+    covers: (u32, u32),
+    counts: [u32; 3],
+}
+
+/// The ground probes reach this far (metres) from an edge (`reuse::Dirty`).
+const REUSE_PAD: f32 = 0.5;
+
 /// Bevels (GTA space, metres, Z up, counterclockwise from above), their
 /// source tops, and the triangles they bury. `grid`: `tris` in `CELL` cells.
 pub fn bevels_with_sources(tris: &[[Vec3; 3]], grid: &XyGrid) -> Bevels {
+    bevels_reusing(tris, grid, &crate::reuse::Dirty::everything(), &mut CurbCache::default())
+}
+
+/// As `bevels_with_sources`, keeping what edges `dirty` leaves untouched gave
+/// last build (`cache`, which then holds this build's).
+pub fn bevels_reusing(tris: &[[Vec3; 3]], grid: &XyGrid, dirty: &crate::reuse::Dirty, cache: &mut CurbCache) -> Bevels {
     // Diagnostic A/B switch (harness and in-game): SKATEV_CURB_BEVELS=0.
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *OFF.get_or_init(|| std::env::var("SKATEV_CURB_BEVELS").is_ok_and(|v| v == "0")) {
         return Bevels { triangles: Vec::new(), sources: Vec::new(), buried: Vec::new(), census: BevelCensus::default() };
     }
+    let floors = Floors::new(tris);
     let key = |v: Vec3| v.to_array().map(|x| (x * 200.0).round() as i32);
     // Edges of flat tops, once (an edge shared by two tops is interior).
-    let mut edges: HashMap<([i32; 3], [i32; 3]), (Vec3, Vec3, Vec3, u32, usize)> = HashMap::new();
+    let mut edges: HashMap<([i32; 3], [i32; 3]), (Vec3, Vec3, Vec3, u32, usize)> = HashMap::default();
     for (source, t) in tris.iter().enumerate() {
         let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
         if n.z < TOP_NORMAL_Z {
@@ -190,7 +240,11 @@ pub fn bevels_with_sources(tris: &[[Vec3; 3]], grid: &XyGrid) -> Bevels {
     let mut out = Vec::new();
     let mut sources = Vec::new();
     let mut covers: Vec<Cover> = Vec::new();
-    for (a, b, centroid, uses, source) in edges.into_values() {
+    // In key order, so the bevels come out the same on every run.
+    let mut edges: Vec<_> = edges.into_iter().collect();
+    edges.sort_unstable_by_key(|(k, _)| *k);
+    let mut next = CurbCache::default();
+    for (k, (a, b, centroid, uses, source)) in edges {
         if uses != 1 {
             continue;
         }
@@ -200,6 +254,55 @@ pub fn bevels_with_sources(tris: &[[Vec3; 3]], grid: &XyGrid) -> Bevels {
             continue;
         }
         census.edges += 1;
+        let id = k.0.iter().chain(&k.1).map(|&x| x as u64)
+            .chain([a, b, centroid].iter().flat_map(|v| v.to_array()).map(|x| x.to_bits() as u64))
+            .chain([crate::reuse::tri_key(&tris[source])])
+            .fold(0u64, |h, x| crate::reuse::mix(h ^ x));
+        let (t0, c0) = (out.len(), covers.len());
+        let before = [census.bevels, census.slopes, census.curbs];
+        let old = (!dirty.touches(a.min(b), a.max(b), REUSE_PAD)).then(|| cache.edges.get(&id).copied()).flatten();
+        if let Some(g) = old {
+            let (ts, tn) = g.triangles;
+            out.extend_from_slice(&cache.triangles[ts as usize..(ts + tn) as usize]);
+            sources.extend(std::iter::repeat_n(source, tn as usize));
+            covers.extend_from_slice(&cache.covers[g.covers.0 as usize..(g.covers.0 + g.covers.1) as usize]);
+            census.bevels += g.counts[0] as usize;
+            census.slopes += g.counts[1] as usize;
+            census.curbs += g.counts[2] as usize;
+        } else {
+            bevel_edge(tris, grid, &floors, a, b, centroid, source, &mut out, &mut sources, &mut covers, &mut census);
+        }
+        next.edges.insert(id, Gave {
+            triangles: (next.triangles.len() as u32, (out.len() - t0) as u32),
+            covers: (next.covers.len() as u32, (covers.len() - c0) as u32),
+            counts: [census.bevels - before[0], census.slopes - before[1], census.curbs - before[2]].map(|n| n as u32),
+        });
+        next.triangles.extend_from_slice(&out[t0..]);
+        next.covers.extend_from_slice(&covers[c0..]);
+    }
+    *cache = next;
+    finish(tris, out, sources, covers, census)
+}
+
+/// One top edge's bevel pieces: their triangles (with `source`) and covers,
+/// counted into `census`.
+#[allow(clippy::too_many_arguments)]
+fn bevel_edge(
+    tris: &[[Vec3; 3]],
+    grid: &XyGrid,
+    floors: &Floors,
+    a: Vec3,
+    b: Vec3,
+    centroid: Vec3,
+    source: usize,
+    out: &mut Vec<[Vec3; 3]>,
+    sources: &mut Vec<usize>,
+    covers: &mut Vec<Cover>,
+    census: &mut BevelCensus,
+) {
+    {
+        let along = b - a;
+        let len = along.truncate().length();
         let dir = along.truncate() / len;
         let mut out_xy = bevy_math::Vec2::new(dir.y, -dir.x);
         let mid = (a + b) * 0.5;
@@ -207,22 +310,31 @@ pub fn bevels_with_sources(tris: &[[Vec3; 3]], grid: &XyGrid) -> Bevels {
             out_xy = -out_xy;
         }
         let pieces = (len / PIECE).ceil().max(1.0) as usize;
-        for k in 0..pieces {
-            let p0 = a + along * (k as f32 / pieces as f32);
-            let p1 = a + along * ((k + 1) as f32 / pieces as f32);
-            // Lower ground just outside both ends of the piece.
-            let below = |p: Vec3| {
+        // Per piece end (shared by neighbouring pieces, probed once): the
+        // lower ground just outside, and whether anything higher sits there
+        // (a wall, not a curb).
+        let end = |k: usize| a + along * (k as f32 / pieces as f32);
+        let mut below_at: Vec<Option<Option<f32>>> = vec![None; pieces + 1];
+        let mut blocked_at: Vec<Option<bool>> = vec![None; pieces + 1];
+        let mut below = |k: usize| {
+            *below_at[k].get_or_insert_with(|| {
+                let p = end(k);
                 let q = p.truncate() + out_xy * SAMPLE_OUT;
-                ground(grid, tris, q.x, q.y, p.z - MAX_STEP - 0.01, p.z - MIN_STEP)
+                ground(grid, &floors, tris, q.x, q.y, p.z - MAX_STEP - 0.01, p.z - MIN_STEP)
                     .filter(|z| p.z - z <= MAX_STEP)
-            };
-            let (Some(z0), Some(z1)) = (below(p0), below(p1)) else { continue };
-            // Nothing higher may sit just outside (a wall, not a curb).
-            let blocked = |p: Vec3| {
+            })
+        };
+        let mut blocked = |k: usize| {
+            *blocked_at[k].get_or_insert_with(|| {
+                let p = end(k);
                 let q = p.truncate() + out_xy * SAMPLE_OUT;
-                ground(grid, tris, q.x, q.y, p.z - MIN_STEP + 1e-3, p.z + 0.5).is_some()
-            };
-            if blocked(p0) || blocked(p1) {
+                ground(grid, &floors, tris, q.x, q.y, p.z - MIN_STEP + 1e-3, p.z + 0.5).is_some()
+            })
+        };
+        for k in 0..pieces {
+            let (p0, p1) = (end(k), end(k + 1));
+            let (Some(z0), Some(z1)) = (below(k), below(k + 1)) else { continue };
+            if blocked(k) || blocked(k + 1) {
                 continue;
             }
             let rise = ((p0.z - z0) + (p1.z - z1)) * 0.5;
@@ -237,8 +349,8 @@ pub fn bevels_with_sources(tris: &[[Vec3; 3]], grid: &XyGrid) -> Bevels {
                 let mid = (p0 + p1) * 0.5;
                 let q0 = mid.truncate() + out_xy * SAMPLE_OUT;
                 let q1 = mid.truncate() + out_xy * (SAMPLE_OUT + GRADE_SPAN);
-                let z0 = ground(grid, tris, q0.x, q0.y, mid.z - MAX_STEP - 0.01, mid.z - MIN_STEP);
-                let z1 = ground(grid, tris, q1.x, q1.y, mid.z - MAX_STEP - 0.3, mid.z - MIN_STEP);
+                let z0 = ground(grid, &floors, tris, q0.x, q0.y, mid.z - MAX_STEP - 0.01, mid.z - MIN_STEP);
+                let z1 = ground(grid, &floors, tris, q1.x, q1.y, mid.z - MAX_STEP - 0.3, mid.z - MIN_STEP);
                 match (z0, z1) {
                     (Some(a), Some(b)) => (b - a) / GRADE_SPAN,
                     _ => 0.0,
@@ -292,6 +404,10 @@ pub fn bevels_with_sources(tris: &[[Vec3; 3]], grid: &XyGrid) -> Bevels {
             census.bevels += 1;
         }
     }
+}
+
+/// The input triangles the covers bury, with the bevels.
+fn finish(tris: &[[Vec3; 3]], out: Vec<[Vec3; 3]>, sources: Vec<usize>, covers: Vec<Cover>, mut census: BevelCensus) -> Bevels {
     // Non-walkable triangles wholly inside the covered solids.
     let mut near = XyGrid::new(CELL);
     for (i, c) in covers.iter().enumerate() {

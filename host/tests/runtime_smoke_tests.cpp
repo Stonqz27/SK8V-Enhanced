@@ -98,11 +98,18 @@ void Screenshot(const hudrender::Frame& f,const std::filesystem::path& path){
 int wmain(int argc,wchar_t** argv){
     RuntimeBridge rt;
     try{
-        Check(argc==2,"pass the Enhanced project root");const std::filesystem::path root(argv[1]);
-        const auto evidence=root/L"port-evidence/runtime-smoke";std::filesystem::create_directories(evidence);
+        Check(argc==2||argc==4,"pass fixture root [runtime DLL evidence directory]");const std::filesystem::path root(argv[1]);
+        const auto evidence=argc==4?std::filesystem::path(argv[3]):root/L"port-evidence/runtime-smoke";
+        const auto runtime=argc==4?std::filesystem::path(argv[2]):root/L"rust/target/release/SkateVRuntime.dll";
+        std::filesystem::create_directories(evidence);
         Floor floor;std::string error;
         const auto data=(root/L"local/skate-data/assets").string(),cache=(evidence/L"fixture.svwc").string(),log=(evidence/L"runtime.log").string();
-        Check(rt.Load((root/L"rust/target/release/SkateVRuntime.dll").c_str(),data,cache,log,3000,3,error),error.c_str());
+        const bool loaded=rt.Load(runtime.c_str(),data,cache,log,3000,3,error);
+        Check(loaded,error.c_str());
+        const int gestures[4]={23,7,24,22};
+        Check(rt.SetGestures(gestures),"1.1.8 gestures export");
+        Check(rt.SetPosture(0)&&rt.SetRidingStyle(0),"1.1.8 posture/style exports");
+        Check(rt.SetEquipment(0.7f,0.7f),"1.1.8 equipment export");
         auto module=GetModuleHandleW(L"SkateVRuntime.dll");Hud hud(module,rt.Handle());
         Check(rt.SetPhysicsLevel(floor.owner.at(),0x1000,0x7FFF00000000)!=0,"Enhanced physics owner");
         const auto peds=(root/L"local/peds-enhanced").string();SvCharacter character{sizeof character};character.model_hash=0x9B22DBAF;character.cache_root_utf8=peds.c_str();
@@ -156,6 +163,8 @@ int wmain(int argc,wchar_t** argv){
         Check(o.tick>firstTick+500,"simulation did not advance");Check(maxTravel>2,"pushing did not move the skater");Check(cameras>500,"camera publication missing");
         Check(hudFrames>0&&best.textures&&!best.textures->empty(),"original HUD publication missing");Check(maxRidingSeparation<2,"riding board separated from skater");
         Check(audioStatus(rt.Handle(),&as)!=0&&as.state==SV_AUDIO_READY&&audioSamples>0&&audioEnergy>0.0001,"original Skate event audio silent");
+        SvGround ground{};
+        Check(rt.GroundAt({0,0,0.1f},1.f,ground)&&std::fabs(ground.height)<0.001f&&ground.material==4&&ground.normal.z>0.99f,"1.1.8 ground/material publication");
         // Change the real cached skeleton while the same session keeps running.
         for(const auto model:{std::pair<uint32_t,uint32_t>{0x0D7114C9,354},{0x9B810FA2,282}}){
             character.model_hash=model.first;Check(rt.SetCharacter(&character),"protagonist request");uint32_t bones=0;

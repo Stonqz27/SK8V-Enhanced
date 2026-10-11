@@ -59,6 +59,10 @@ add_library(${SK8V_HOST} SHARED
   src/stall_sampler.cpp
   src/physics_level.cpp
   src/menu.cpp
+  src/ps_pad.cpp
+  src/board_stencil.cpp
+  src/board_tracks.cpp
+  src/thread_census.cpp
 )
 target_compile_features(${SK8V_HOST} PRIVATE cxx_std_20)
 target_compile_definitions(${SK8V_HOST} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -107,7 +111,7 @@ if(SK8V_ENHANCED_AUDIO_PROBE OR SK8V_ENHANCED_GAMEPLAY)
   add_test(NAME LegacyAudioRingTests COMMAND LegacyAudioRingTests)
 endif()
 target_include_directories(${SK8V_HOST} PRIVATE include "${SHVDIR}/inc")
-target_link_libraries(${SK8V_HOST} PRIVATE "${SHVDIR}/lib/ScriptHookV.lib" version xinput shell32)
+target_link_libraries(${SK8V_HOST} PRIVATE "${SHVDIR}/lib/ScriptHookV.lib" version xinput hid setupapi shell32)
 # Original Skate 3 HUD overlay (hud_overlay.cpp): D3D11 + runtime shader compile.
 target_link_libraries(${SK8V_HOST} PRIVATE d3d11 dxgi d3dcompiler)
 set_target_properties(${SK8V_HOST} PROPERTIES PREFIX "" SUFFIX ".asi")
@@ -115,6 +119,9 @@ set_target_properties(${SK8V_HOST} PROPERTIES PREFIX "" SUFFIX ".asi")
 if(MSVC)
   target_compile_options(${SK8V_HOST} PRIVATE /W4 /permissive- /EHsc)
   target_compile_options(${SK8V_HOST} PRIVATE $<$<CONFIG:Release>:/O2>)
+  # Keep crash symbols locally; embed only the PDB filename.
+  target_compile_options(${SK8V_HOST} PRIVATE /Zi)
+  target_link_options(${SK8V_HOST} PRIVATE /DEBUG /OPT:REF /OPT:ICF /PDBALTPATH:%_PDB%)
 endif()
 
 add_executable(GameBuildTests tests/game_build_tests.cpp)
@@ -125,6 +132,14 @@ add_executable(AnimationDetourTests tests/animation_detour_tests.cpp)
 target_compile_features(AnimationDetourTests PRIVATE cxx_std_20)
 target_compile_definitions(AnimationDetourTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 add_test(NAME AnimationDetourTests COMMAND AnimationDetourTests)
+if(SK8V_ENHANCED)
+  # No D3D11 or ScriptHook linkage: the Legacy detour cannot leak into Enhanced.
+  add_executable(EnhancedStencilGuardTests tests/enhanced_stencil_guard_tests.cpp src/board_stencil.cpp)
+  target_compile_features(EnhancedStencilGuardTests PRIVATE cxx_std_20)
+  target_compile_definitions(EnhancedStencilGuardTests PRIVATE SK8V_ENHANCED=1)
+  target_include_directories(EnhancedStencilGuardTests PRIVATE src)
+  add_test(NAME EnhancedStencilGuardTests COMMAND EnhancedStencilGuardTests)
+endif()
 add_executable(HudPresentTests tests/hud_present_tests.cpp src/hud_renderer.cpp)
 target_compile_features(HudPresentTests PRIVATE cxx_std_20)
 target_compile_definitions(HudPresentTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

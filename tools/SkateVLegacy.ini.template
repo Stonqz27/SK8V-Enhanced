@@ -4,6 +4,15 @@ WorldCache={WorldCache}
 ; Presentation tuning.
 PedZOffset=1.0
 CameraFovScale=1.0
+; BoardTracks: 1 = the wheels leave GTA's tread marks in sand, mud, dirt, grass and snow; 0 = none.
+BoardTracks=1
+; Snow: 0 = auto (GTA's snow level and snowy weather), 1 = always (a trainer's ground snow), 2 = never.
+; With snow on, every ground takes snow tracks and the board stays clean.
+Snow=0
+; RadioControls: 1 = LB + d-pad left/right steps GTA's radio while skating; 0 = off.
+RadioControls=1
+; TrickAnalyzer: 1 = Skate 3's Trick Analyzer shows each trick's stick gesture (bottom centre); 0 = off.
+TrickAnalyzer=1
 DrawBoard=1
 ; Native Skate board: owned skeletal drawable, original texture/normal/specular inputs, GTA lighting and shadows.
 BoardNative=1
@@ -36,6 +45,19 @@ AirTimeLimit=30
 Difficulty=Easy
 ; Camera: Skate 3's camera, High (default) or Low (closer to the ground). Kept across reinstalls.
 Camera=High
+; Emote<Up|Down|Left|Right>: Skate 3's gesture on that d-pad direction while skating (None or a name from the menu).
+; LB + d-pad left/right changes the radio station; LB + d-pad up/down is Skate's session marker.
+EmoteUp=Raise the roof
+EmoteDown=Dunno
+EmoteLeft=Shaka
+EmoteRight=Point
+; Posture: Skate 3's riding posture, Normal, Stiff, Slouch or Buff.
+Posture=Normal
+; RidingStyle: Skate 3's riding animations, Default, Loose, Gonzo or Aggressive.
+RidingStyle=Default
+; TruckTightness / WheelHardness: Skate 3's board setup, 0..1 (0.7 default). Tighter trucks turn less and wobble later; harder wheels slide more.
+TruckTightness=0.7
+WheelHardness=0.7
 ; LipRule: 1 = a rolling board stalls on a ramp lip or coping only when riding up into it slowly; dropping in and
 ;   carrying speed over a lip never catch the trucks (ollie onto it to grind). 0 = Skate 3's own. Kept across reinstalls.
 LipRule=1
@@ -80,7 +102,6 @@ SwimDepth=1.0
 ; Retail replays the recorded marker/respawn/recall inputs, with no launch velocity override.
 BackwardsMan=1
 BackwardsManChord=0x00C0
-BackwardsManDirection=Backward
 BackwardsManRemountDelay=6
 ; Lifecycle: the board comes out from the weapon wheel or the menu (Skate on / off); SkateV stays loaded in the background.
 ; Y mounts/dismounts while Skate is active; holding Y puts the board away. MenuButton = combined XInput mask that opens the menu (0x0120 = Back + LB, 0 = off; / always works).

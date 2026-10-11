@@ -16,6 +16,9 @@
 #include <filesystem>
 #include <share.h>
 #include "board_native.h"
+#include "board_stencil.h"
+#include "board_tracks.h"
+#include "streaming.h"
 #include "ped_collision_native.h"
 #include "dynamic_world.h"
 #include "gta_audio.h"
@@ -25,7 +28,9 @@
 #include "hud_overlay.h"
 #include "records_ui.h"
 #include "lifecycle.h"
+#include "thread_census.h"
 #include "menu.h"
+#include "ps_pad.h"
 #include "map_states.h"
 #include "pack_loader.h"
 #include "pose_hook.h"
@@ -76,6 +81,8 @@ struct Config {
     // looks, d-pad left/right changes weapon; aiming leaves Skate the left
     // stick and A. Gun away: LB is Skate's; d-pad left/right steps the radio.
     bool boardAim = true;
+    bool radioControls = true; // RadioControls=0: LB + d-pad left/right no longer steps the radio
+    bool trickAnalyzer = true; // TrickAnalyzer=1: Skate 3's Trick Analyzer (each trick's stick gesture)
     // Gun out: GTA animates the ped (its own aim, weapon and wheel tasks) and
     // Skate keeps the lower half. GunIK: 0 none, 1 arm IK (left hand onto the
     // grip), 2 also torso and head IK. GunProbe: log GTA's task tree and
@@ -83,8 +90,12 @@ struct Config {
     int gunIk = 1;
     float aimTwist = 80.0f; // AimTwist: most the aiming chest turns from the stance (degrees); shots still go to the reticle
     bool gunProbe = false;
+    bool gtaCamera = false; // GtaCamera=1 (Dev): skate with GTA's gameplay camera rendering, to measure the script camera's frame cost
     std::uint16_t aimButton = 0x0100, fireButton = 0x0200, gunButton = 0x0020;
     bool drawSkater = true;        // DrawSkater: the board mesh while the native board is unavailable
+    int boardTracks = 1;           // BoardTracks=1: tread marks in sand, mud, dirt, grass and snow
+    int snow = 0;                  // Snow: 0 auto (GTA's snow level and weather), 1 always, 2 never
+    float trackWidth = 0.08f;      // TrackWidth: tread mark width (m)
     bool hallOfMeat = true;        // HallOfMeat=1: Skate 3's bail scoring, broken-bone slow-mo, HoM HUD
     bool hallOfMeatMetrics = false; // HallOfMeatMetrics=1: every metric panel, not only those over threshold
     bool goofy = false;            // Stance=Goofy: Skate profile stance (default Regular: A is the normal push)
@@ -95,6 +106,11 @@ struct Config {
     bool lipRule = true;           // LipRule=1: stall on a ramp lip only riding up slowly; 0 retail grind admission
     int difficulty = 0;            // Difficulty=Easy|Normal|Hardcore|Motorized: Skate 3's physics_mode (index)
     int cameraType = 1;            // Camera=Low|High: Skate 3's stock camera graph branch (0 Low, 1 High)
+    int gestures[4] = {23, 7, 24, 22}; // EmoteUp/Down/Left/Right: d-pad gesture per direction (kGestures index, -1 None)
+    int posture = 0;               // Posture=Normal|Stiff|Slouch|Buff: Skate 3's riding posture (kPostures index)
+    int ridingStyle = 0;           // RidingStyle=Default|Loose|Gonzo|Aggressive: Skate 3's riding animations (kRidingStyles index)
+    float truckTightness = 0.7f;   // TruckTightness: 0 loose .. 1 tight (Skate 3 default 0.7)
+    float wheelHardness = 0.7f;    // WheelHardness: 0 soft .. 1 hard (Skate 3 default 0.7)
     int skaterTriangles = 3000;
     bool dynamicWorld = true;
     float dynamicRadius = 35.0f;
@@ -137,7 +153,6 @@ struct Config {
     bool backwardsMan = true;
     unsigned backwardsManChord = 0x00C0; // L3 + R3
     unsigned putAwayHoldMs = 600; // Y held this long while skating puts the board away (0 = off)
-    bool backwardsManBackward = true;
     unsigned backwardsManRemountDelay = 6;
     // Seamless lifecycle (ledger P0-1): controller board action, guards,
     // background preparation. The menu's "Skate on / off" is the manual activation.
@@ -200,6 +215,23 @@ void Store(Config& c, const std::string& v) { Parse(v, c.*Field); }
 std::string Speech(const std::string& v) { return v == "0" ? "" : v; }
 
 const char* const kDifficulties[] = {"Easy", "Normal", "Hardcore", "Motorized"};
+// Skate 3's 37 d-pad gestures in catalog order (overlay patch 0045): INI value and menu name.
+const char* const kGestures[37] = {
+    "Air guitar", "Airplane", "Boxing", "Bruce Lee", "Check time", "Devil horns",
+    "Double guns", "Dunno", "Finger wag", "Fists", "Bicep flex", "Flip table",
+    "Fonz", "Freedom", "Fist shake", "Get away", "Get outta here", "Handcuffs",
+    "High pump", "Low pump", "Rewind", "Peace", "Point", "Raise the roof",
+    "Shaka", "Shrug", "Point to the sky", "Snap", "Soul arch", "Spock",
+    "Surf's up", "Swing high", "Swing low", "Throw arms", "Thumbs down", "Wings",
+    "Yard sale"};
+const char* const kGestureKeys[4] = {"EmoteUp", "EmoteDown", "EmoteLeft", "EmoteRight"};
+const char* const kPostures[] = {"Normal", "Stiff", "Slouch", "Buff"};
+const char* const kRidingStyles[] = {"Default", "Loose", "Gonzo", "Aggressive"};
+int GestureIndex(const std::string& v) {
+    for (int i = 0; i < 37; ++i)
+        if (menu::SameText(v, kGestures[i])) return i;
+    return -1;
+}
 
 const Key kKeys[] = {
     {"DataRoot", Store<&Config::dataRoot>},
@@ -216,14 +248,20 @@ const Key kKeys[] = {
     {"LiveClip", Store<&Config::liveClip>},
     {"StallSampler", Store<&Config::stallSampler>},
     {"BoardAim", Store<&Config::boardAim>},
+    {"RadioControls", Store<&Config::radioControls>},
+    {"TrickAnalyzer", Store<&Config::trickAnalyzer>},
     {"GunIK", Store<&Config::gunIk>},
     {"GunProbe", Store<&Config::gunProbe>},
+    {"GtaCamera", Store<&Config::gtaCamera>},
     {"AimTwist", Store<&Config::aimTwist>},
     {"AimButton", Store<&Config::aimButton>},
     {"FireButton", Store<&Config::fireButton>},
     {"GunButton", Store<&Config::gunButton>},
     {"DrawSkater", Store<&Config::drawSkater>},
     {"HallOfMeat", Store<&Config::hallOfMeat>},
+    {"BoardTracks", Store<&Config::boardTracks>},
+    {"Snow", Store<&Config::snow>},
+    {"TrackWidth", Store<&Config::trackWidth>},
     {"HallOfMeatMetrics", Store<&Config::hallOfMeatMetrics>},
     {"Stance", [](Config& c, const std::string& v) { c.goofy = menu::SameText(v, "goofy") || v == "1"; }},
     {"BailTimeLimit", Store<&Config::bailTimeLimit>},
@@ -235,6 +273,22 @@ const Key kKeys[] = {
              if (menu::SameText(v, kDifficulties[i])) c.difficulty = i;
      }},
     {"Camera", [](Config& c, const std::string& v) { c.cameraType = menu::SameText(v, "Low") ? 0 : 1; }},
+    {"EmoteUp", [](Config& c, const std::string& v) { c.gestures[0] = GestureIndex(v); }},
+    {"EmoteDown", [](Config& c, const std::string& v) { c.gestures[1] = GestureIndex(v); }},
+    {"EmoteLeft", [](Config& c, const std::string& v) { c.gestures[2] = GestureIndex(v); }},
+    {"EmoteRight", [](Config& c, const std::string& v) { c.gestures[3] = GestureIndex(v); }},
+    {"Posture", [](Config& c, const std::string& v) {
+         c.posture = 0;
+         for (int i = 0; i < 4; ++i)
+             if (menu::SameText(v, kPostures[i])) c.posture = i;
+     }},
+    {"RidingStyle", [](Config& c, const std::string& v) {
+         c.ridingStyle = 0;
+         for (int i = 0; i < 4; ++i)
+             if (menu::SameText(v, kRidingStyles[i])) c.ridingStyle = i;
+     }},
+    {"TruckTightness", Store<&Config::truckTightness>},
+    {"WheelHardness", Store<&Config::wheelHardness>},
     {"SkitchStandoff", Store<&Config::skitchStandoff>},
     {"SkaterTriangles", Store<&Config::skaterTriangles>},
     {"DynamicWorld", Store<&Config::dynamicWorld>},
@@ -261,7 +315,6 @@ const Key kKeys[] = {
     {"BackwardsMan", Store<&Config::backwardsMan>},
     {"BackwardsManChord", Store<&Config::backwardsManChord>},
     {"Line", Store<&Config::line>},
-    {"BackwardsManDirection", [](Config& c, const std::string& v) { c.backwardsManBackward = v != "Forward"; }},
     {"BackwardsManRemountDelay", Store<&Config::backwardsManRemountDelay>},
     {"MenuButton", [](Config& c, const std::string& v) { Parse(v, c.life.menuButton); }},
     {"PutAwayHoldMs", Store<&Config::putAwayHoldMs>},
@@ -366,35 +419,104 @@ void DrawHud(const SvOutput& o, const SvScoreState& s, bool debug) {
     }
 }
 
+// GTA's own XInputGetState: the IAT slot of its XINPUT1_4 ordinal 2 import. A hook on what
+// GTA calls (Steam Input, a pad wrapper) can leave this ASI's import blind: a player's Xbox pad
+// moved GTA's player while SK8V found no controller on any slot (2026-10-11).
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+XInputGetStateFn FindGtaXInputGetState() {
+    __try {
+        auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+        const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (!dir.VirtualAddress) return nullptr;
+        for (auto* d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); d->Name; ++d) {
+            if (_stricmp(reinterpret_cast<const char*>(base + d->Name), "XINPUT1_4.dll") != 0) continue;
+            const auto* names = reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + d->OriginalFirstThunk);
+            const auto* slots = reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + d->FirstThunk);
+            for (; names->u1.Ordinal; ++names, ++slots)
+                if (IMAGE_SNAP_BY_ORDINAL64(names->u1.Ordinal) && IMAGE_ORDINAL64(names->u1.Ordinal) == 2)
+                    return reinterpret_cast<XInputGetStateFn>(slots->u1.Function);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return nullptr;
+}
+
+XInputGetStateFn PadGetState() {
+    static const XInputGetStateFn fn = [] {
+        const XInputGetStateFn gta = FindGtaXInputGetState();
+        HMODULE module = nullptr;
+        wchar_t name[MAX_PATH] = L"?";
+        if (gta && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                      reinterpret_cast<LPCWSTR>(gta), &module))
+            GetModuleFileNameW(module, name, MAX_PATH);
+        const wchar_t* shortName = wcsrchr(name, L'\\') ? wcsrchr(name, L'\\') + 1 : name;
+        // &XInputGetState is this ASI's import stub; the export is what an unhooked import holds.
+        const HMODULE xinput = GetModuleHandleW(L"XINPUT1_4.dll");
+        const auto exported = xinput ? reinterpret_cast<void*>(GetProcAddress(xinput, "XInputGetState")) : nullptr;
+        Logf("SkateV Legacy: pads read through GTA's XInputGetState %p in %s (%s; XINPUT1_4's export %p)",
+             reinterpret_cast<void*>(gta), util::Narrow(shortName).c_str(),
+             !gta ? "not found, this ASI's import used" : reinterpret_cast<void*>(gta) == exported ? "not hooked" : "hooked",
+             exported);
+        return gta ? gta : &XInputGetState;
+    }();
+    return fn;
+}
+
 SvPad ReadPadRaw() {
     // Polled every frame in and out of skate mode (board action). XInput is
-    // slow on empty slots, so the last connected slot is read each frame and
-    // the others are scanned at most once a second.
-    static DWORD s_slot = XUSER_MAX_COUNT;
-    static DWORD s_nextScan = 0;
-    SvPad pad{};
+    // slow on empty slots, so connected slots are read each frame and the
+    // others are scanned at most once a second. The pad used is the one that
+    // last pressed something, so an idle or virtual pad on a lower slot can't
+    // take over the player's controller; else the lowest connected slot.
+    // s_nextScan starts at the first call's tick: from 0, a tick count past 2^31 ms (24.8 days up,
+    // Fast Startup keeps counting) never came due, so no pad was ever found (a player, 2026-10-11).
     const DWORD now = GetTickCount();
-    const bool scan = s_slot >= XUSER_MAX_COUNT || static_cast<LONG>(now - s_nextScan) >= 0;
+    static DWORD s_connected = 0, s_nextScan = now, s_active = XUSER_MAX_COUNT;
+    const bool scan = static_cast<LONG>(now - s_nextScan) >= 0;
+    if (scan) s_nextScan = now + 1000;
+    XINPUT_STATE st[XUSER_MAX_COUNT]{};
+    DWORD pressing = XUSER_MAX_COUNT;
     for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
-        if (!scan && i != s_slot) continue;
-        XINPUT_STATE st{};
-        if (XInputGetState(i, &st) != ERROR_SUCCESS) {
-            if (i == s_slot) s_slot = XUSER_MAX_COUNT;
+        if (!scan && !(s_connected & (1u << i))) continue;
+        if (PadGetState()(i, &st[i]) != ERROR_SUCCESS) {
+            s_connected &= ~(1u << i);
             continue;
         }
-        s_slot = i;
-        pad.connected = 1;
-        pad.packet = st.dwPacketNumber;
-        pad.buttons = st.Gamepad.wButtons;
-        pad.left_trigger = st.Gamepad.bLeftTrigger;
-        pad.right_trigger = st.Gamepad.bRightTrigger;
-        pad.left_x = st.Gamepad.sThumbLX;
-        pad.left_y = st.Gamepad.sThumbLY;
-        pad.right_x = st.Gamepad.sThumbRX;
-        pad.right_y = st.Gamepad.sThumbRY;
-        break;
+        s_connected |= 1u << i;
+        const XINPUT_GAMEPAD& g = st[i].Gamepad;
+        if ((g.wButtons || g.bLeftTrigger > 64 || g.bRightTrigger > 64) && (pressing == XUSER_MAX_COUNT || i == s_active))
+            pressing = i;
     }
-    if (scan) s_nextScan = now + 1000;
+    DWORD active = pressing;
+    if (active == XUSER_MAX_COUNT) {
+        active = (s_connected >> s_active) & 1u ? s_active : XUSER_MAX_COUNT;
+        for (DWORD i = 0; active == XUSER_MAX_COUNT && i < XUSER_MAX_COUNT; ++i)
+            if (s_connected & (1u << i)) active = i;
+    }
+    // No XInput pad: a PlayStation pad GTA reads natively (Steam Input and
+    // DS4Windows present theirs as XInput, which wins so input isn't doubled).
+    SvPad pad{};
+    const char* ps = nullptr;
+    const bool havePs = active == XUSER_MAX_COUNT && pspad::Read(pad, &ps);
+    static const char* s_ps = nullptr;
+    if (active != s_active || ps != s_ps) {
+        if (active < XUSER_MAX_COUNT) Logf("SkateV Legacy: controller slot %lu (connected mask %lx)", active, s_connected);
+        else if (havePs) Logf("SkateV Legacy: controller %s", ps);
+        else Logf("SkateV Legacy: no controller connected");
+        s_active = active, s_ps = havePs ? ps : nullptr;
+    }
+    if (active == XUSER_MAX_COUNT) return pad;
+    const XINPUT_GAMEPAD& g = st[active].Gamepad;
+    pad.connected = 1;
+    pad.packet = st[active].dwPacketNumber;
+    pad.buttons = g.wButtons;
+    pad.left_trigger = g.bLeftTrigger;
+    pad.right_trigger = g.bRightTrigger;
+    pad.left_x = g.sThumbLX;
+    pad.left_y = g.sThumbLY;
+    pad.right_x = g.sThumbRX;
+    pad.right_y = g.sThumbRY;
     return pad;
 }
 
@@ -407,6 +529,30 @@ SvPad ReadPad() {
 }
 
 // ---- frame timing ----------------------------------------------------------
+// The skating frame split into parts (VerboseLog): Lap(part) books the time
+// since the previous lap to `part`; LapStart() begins a frame. Only skating
+// frames count (FrameMonitor::Frame folds g_frameMs into g_partMs).
+enum FramePart { kPartLifecycle, kPartControlsRead, kPartControls, kPartInput, kPartWorld, kPartStep, kPartPose, kPartCamera, kPartBoard,
+                 kPartAfter, kPartHud, kPartMenu, kPartRecords, kPartAudio, kPartLevel, kPartCount };
+const char* const kPartNames[kPartCount] = {"lifecycle", "controls read", "controls", "input", "world", "step", "pose", "camera",
+                                            "board", "after", "hud", "menu", "records", "audio", "level"};
+double g_partMs[kPartCount]{};
+unsigned g_gtaCamFrames = 0; // skating frames GTA's gameplay camera rendered (GtaCamera)
+double g_frameMs[kPartCount]{};
+double g_lapAt = 0.0;
+double QpcMs() {
+    static const double perMs = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return static_cast<double>(f.QuadPart) / 1000.0; }();
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return static_cast<double>(t.QuadPart) / perMs;
+}
+void LapStart() { g_lapAt = QpcMs(); }
+void Lap(FramePart part) {
+    const double now = QpcMs();
+    g_frameMs[part] += now - g_lapAt;
+    g_lapAt = now;
+}
+
 // Wall time between script frames (game-thread frame pacing) and the time
 // SkateV's own per-frame work takes, logged every 10 s in or out of skate mode,
 // so a hitch can be attributed to the game or to this mod.
@@ -424,6 +570,8 @@ public:
     }
     // Call once per script frame, right after WAIT(0) returns.
     void Frame(bool active) {
+        static const bool named = (threadcensus::Name(L"gta-script (SkateV tick)"), true);
+        (void)named;
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
         const double ms = static_cast<double>(now.QuadPart - last_.QuadPart) * 1000.0 / static_cast<double>(freq_.QuadPart);
@@ -435,11 +583,35 @@ public:
             if (util::g_verbose) Logf("hitch %.1f ms (skating %d): SkateV script work %.2f ms", ms, active ? 1 : 0, lastWork_);
         }
         activeFrames_ += active ? 1 : 0;
+        for (int i = 0; i < kPartCount; ++i) {
+            if (active) g_partMs[i] += g_frameMs[i];
+            g_frameMs[i] = 0.0;
+        }
         const double windowMs = static_cast<double>(now.QuadPart - window_.QuadPart) * 1000.0 / static_cast<double>(freq_.QuadPart);
         if (windowMs >= 10000.0) {
-            if (util::g_verbose) Logf("frames %.1fs: %u frames (%.1f fps), worst %.1f ms, %u over 50 ms, SkateV work avg %.3f ms max %.3f ms, skating %u/%u",
+            const unsigned draws = boardstencil::TakeAllDraws();
+            if (util::g_verbose) Logf("frames %.1fs: %u frames (%.1f fps), worst %.1f ms, %u over 50 ms, SkateV work avg %.3f ms max %.3f ms, skating %u/%u (GTA's camera %u), GTA indexed draws %.0f/frame",
                  windowMs / 1000.0, frames_, frames_ * 1000.0 / windowMs, maxFrame_, hitches_,
-                 frames_ ? workTotal_ / frames_ : 0.0, workMax_, activeFrames_, frames_);
+                 frames_ ? workTotal_ / frames_ : 0.0, workMax_, activeFrames_, frames_, std::exchange(g_gtaCamFrames, 0u),
+                 frames_ ? double(draws) / frames_ : 0.0);
+            if (util::g_verbose && activeFrames_) {
+                // Per skating frame, the skating path's parts; then the HUD draw on the render thread.
+                std::string parts;
+                for (int i = 0; i < kPartCount; ++i) {
+                    char item[48];
+                    sprintf_s(item, "%s%s %.3f", i ? ", " : "", kPartNames[i], g_partMs[i] / activeFrames_);
+                    parts += item;
+                }
+                const hudoverlay::PresentStats hud = hudoverlay::TakePresentStats();
+                const posehook::ApplyTime pose = posehook::TakeApplyTime();
+                Logf("frames: skating parts ms/frame: %s; HUD draw (render thread) avg %.3f ms max %.3f ms over %u presents; "
+                     "pose writes in GTA's anim pass %.3f, on its anim workers %.3f ms/frame (%u writes)",
+                     parts.c_str(), hud.count ? hud.totalMs / hud.count : 0.0, hud.maxMs, hud.count,
+                     pose.mainMs / activeFrames_, pose.workerMs / activeFrames_, pose.calls);
+            }
+            // Every thread's CPU in or out of skate mode: what skating makes busier, GTA's threads included.
+            if (util::g_verbose) Logf("threads ms/s: %s", threadcensus::Report(windowMs / 1000.0, 12).c_str());
+            for (double& v : g_partMs) v = 0.0;
             frames_ = hitches_ = activeFrames_ = 0;
             maxFrame_ = workTotal_ = workMax_ = 0.0;
             window_ = now;
@@ -473,6 +645,9 @@ constexpr Hash kBoardWeapon = 0x38A8F85C;
 
 struct Session {
     LifeState state = LifeState::Unprepared;
+    boardtracks::Tracks tracks;
+    unsigned trackMarks = 0;
+    struct { int decal; DWORD checkAt; } firstTrack{};
     Ped ped = 0;
     Cam cam = 0;
     // Skate's camera while GTA's camera eases in after a hand-off.
@@ -497,6 +672,8 @@ struct Session {
     bool wheelOpen = false;          // GTA's weapon wheel held open from GunButton
     DWORD wheelClosedAt = 0;
     bool aiming = false;
+    bool gtaCam = false; // GtaCamera: GTA's gameplay camera renders instead of ours
+    float dynamicDue = 1.0f; // seconds of game time toward Skate's next 60 Hz step (DynamicWorld gathers on it)
     DWORD nextShot = 0;
     DWORD reloadDone = 0; // board reload in progress until (0 none, direct fire only)
     // GTA's own fire: 0 not seen yet, 1 GTA's shots (INPUT_ATTACK), -1 GTA did
@@ -531,6 +708,7 @@ struct Session {
     // Radio banner: the audible track shown last (0 none), when to show the
     // station alone if no track turns up, last poll.
     int radioTrack = 0;
+    DWORD backBlockUntil = 0;  // GTA's interaction menu blocked until (main loop)
     DWORD radioDue = 0;
     DWORD radioPoll = 0;
     DynamicWorld world;
@@ -554,8 +732,12 @@ struct Session {
     lifecycle::BoardAction board;
     DWORD loadedSince = 0;     // player loaded and stable since (Unprepared)
     DWORD lastTrack = 0;       // last sv_lifecycle_track
-    DWORD stateSince = 0;      // entered the current state
+    DWORD stateSince = 0;      // entered the current state (script-frame time: gaps without frames are skipped)
+    DWORD lastLifecycleFrame = 0;
     DWORD suppressEnterUntil = 0; // GTA's INPUT_ENTER held off after leaving
+    std::uint64_t watchTick = 0;  // Skate output tick last seen while skating
+    DWORD watchSince = 0;         // ... since (wall time)
+    int watchFrames = 0;          // ... script frames since (a pause stops these)
     DWORD yHeldSince = 0;         // Y pressed while skating (hold to put the board away)
     bool yWasDown = true;
     bool trackingStarted = false; // preserves opt-out until the first board action
@@ -838,6 +1020,7 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
         s.fadingCamUntil = GetTickCount() + kHandOffMs;
     }
     s.cam = 0;
+    s.gtaCam = false;
     if (s.ped && Call<BOOL>(gta::DOES_ENTITY_EXIST, s.ped)) {
         const SvVec3 p = s.last.skater_position;
         const bool finite = std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
@@ -1014,6 +1197,22 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
             return;
         }
     }
+    // Skate reads only the controller (no keyboard): without one the player
+    // would be held with nothing to move them.
+    if (!ReadPadRaw().connected) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            XINPUT_STATE st{};
+            DWORD codes[2][XUSER_MAX_COUNT]{};
+            for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) codes[0][i] = PadGetState()(i, &st), codes[1][i] = XInputGetState(i, &st);
+            Logf("SkateV Legacy: no controller: XInputGetState slots 0-3 return %lu %lu %lu %lu (this ASI's import %lu %lu %lu %lu)",
+                 codes[0][0], codes[0][1], codes[0][2], codes[0][3], codes[1][0], codes[1][1], codes[1][2], codes[1][3]);
+        }
+        Notify(s, "SK8V needs a controller (Xbox or PlayStation); none is connected", 5000);
+        SetState(s, LifeState::Ready, "no controller");
+        return;
+    }
     if (const char* why = lifecycle::Blocked(ped, strict, cfg.life)) {
         Notify(s, std::string("can't skate now: ") + why, 2500);
         SetState(s, LifeState::Ready, why);
@@ -1042,6 +1241,11 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
     spawn.aspect_ratio = Call<float>(gta::GET_ASPECT_RATIO, 0);
     // Off the board with the board in hand (the player's Y mounts).
     SendMapStates(spawn.position, true);
+    // The previous session's last output must not drive this one (its
+    // position in deep water handed the player straight back to GTA and put
+    // them back there).
+    s.last = SvOutput{};
+    s.last.skater_position = s.last.board_position = spawn.position;
     if (!g_runtime.LifecycleEnter(spawn)) {
         Notify(s, "activation rejected: " + g_runtime.StatusText());
         SetState(s, LifeState::Ready, "activation rejected");
@@ -1100,6 +1304,8 @@ void SendCharacter(const Session& s, const Config& cfg) {
 }
 
 void BeginActive(Session& s, const Config& cfg) {
+    s.tracks.Reset();
+    s.firstTrack = {};
     if (cfg.drawBoard) boardnative::Start(g_gameDir + L"SkateVLegacy.ini",
         std::filesystem::u8path(cfg.dataRoot).wstring(), Log);
     if (cfg.posePed) pedcollision::Start(g_gameDir + L"SkateVLegacy.ini",
@@ -1107,6 +1313,7 @@ void BeginActive(Session& s, const Config& cfg) {
     if (s.fadingCam && Call<BOOL>(gta::DOES_CAM_EXIST, s.fadingCam)) Call<void>(gta::DESTROY_CAM, s.fadingCam, 0);
     s.fadingCam = 0;
     s.cam = Call<Cam>(gta::CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 1);
+    s.dynamicDue = 1.0f; // gather on the first skating frame
     {
         const Vector3 at = Call<Vector3>(gta::GET_FINAL_RENDERED_CAM_COORD);
         const Vector3 rot = Call<Vector3>(gta::GET_FINAL_RENDERED_CAM_ROT, 2);
@@ -1117,6 +1324,7 @@ void BeginActive(Session& s, const Config& cfg) {
     Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kHandOffMs, 1, 0, 0);
     s.poseFadedIn = false;
     s.poseFadingOut = false;
+    s.watchTick = 0, s.watchSince = GetTickCount(), s.watchFrames = 0;
     s.armed = s.aiming = false;
     s.nativeFire = 0, s.fireWas = false, s.wheelOpen = false;
     liveclip::Suspend(s.ped, false);
@@ -1184,19 +1392,35 @@ void StopAim(Session& s, bool restoreCam) {
 // menu) unless LB is held (LB + d-pad is Skate's session marker), and while
 // aiming the look, aim, attack and reload controls.
 // GTA's weapon wheel is open (BoardControls): its controls stay GTA's.
+// Each control is named, so GTA's related actions (disableRelatedActions) are
+// not walked: that walk cost a player 2.4 ms a frame for the ~310 calls
+// (8 us each against 0.08 on the owner's PC).
 bool g_weaponWheel = false;
+
+// Script frames since each control last read non-zero. Only controls in use (or released within
+// the last frames, for GTA's just-released checks) are disabled: DISABLE_CONTROL_ACTION took
+// 7.6 us a call on a player's PC with no other mods (2.4 ms a frame for ~315), 0.06 us on the owner's.
+std::uint8_t g_controlIdle[360]{};
+constexpr std::uint8_t kControlHoldFrames = 10;
 
 void DisableSkateControls(std::uint16_t buttons, bool aiming) {
     if (menu::IsOpen()) return; // the open menu disables every control but pause
+    bool skip[360]{};
     for (int c = 0; c < 360; ++c) {
         // INPUT_WEAPON_WHEEL_UD/LR/NEXT/PREV, SELECT_NEXT/PREV_WEAPON, SELECT_WEAPON
         // (and the look axes 1, 2: the pad's right stick, in case the wheel reads it there)
-        if (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) continue;
-        if (c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349) continue;
-        if (c == 19 && !(buttons & 0x0100)) continue;
-        if (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295))) continue;
-        Call<void>(gta::DISABLE_CONTROL_ACTION, 0, c, 1);
+        skip[c] = (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) ||
+                  c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
+                  (c == 19 && !(buttons & 0x0100)) ||
+                  (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
+        if (skip[c]) continue;
+        // GTA's value this frame whether or not it is disabled (scripts run after the input update).
+        if (Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, c) != 0.0f) g_controlIdle[c] = 0;
+        else if (g_controlIdle[c] < 255) ++g_controlIdle[c];
     }
+    Lap(kPartControlsRead);
+    for (int c = 0; c < 360; ++c)
+        if (!skip[c] && g_controlIdle[c] <= kControlHoldFrames) Call<void>(gta::DISABLE_CONTROL_ACTION, 0, c, 0);
 }
 
 // Radio while skating (GTA's mobile radio): +1 next station, -1 previous,
@@ -1368,8 +1592,8 @@ void GameplayCam(Session& s) {
     Call<void>(gta::RENDER_SCRIPT_CAMS, 0, 1, kAimBlendMs, 1, 0, 0);
 }
 
-// Called with the pad about to go to Skate. Gun away: only the radio (d-pad
-// left/right) is taken. Gun out: GTA runs the ped's player tasks, so its own
+// Called with the pad about to go to Skate. Gun away: only the radio (LB +
+// d-pad left/right) is taken. Gun out: GTA runs the ped's player tasks, so its own
 // aim, attack, reload and weapon wheel act on the pad as on foot: LB/RB stand in
 // for INPUT_AIM / INPUT_ATTACK (the triggers stay Skate's grabs), the d-pad
 // changes weapon, B reloads; while aiming only the left stick and A (push)
@@ -1380,6 +1604,16 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
     const std::uint16_t released = s.aimPrevButtons & ~buttons;
     s.aimPrevButtons = buttons;
     RadioTick(s);
+    // Gun away, LB + d-pad left/right steps the radio (Skate 3's TRAX layout; LB + up/down is
+    // Skate's session marker). The plain d-pad is Skate's gestures; a direction set to None
+    // does not reach Skate.
+    if (cfg.radioControls && !s.armed && (buttons & 0x0100)) {
+        if (pressed & 0x0008) StepRadio(s, 1);  // right: next station
+        if (pressed & 0x0004) StepRadio(s, -1); // left: previous
+    }
+    if (!(buttons & 0x0100))
+        for (int d = 0; d < 4; ++d)
+            if (cfg.gestures[d] < 0) pad.buttons &= static_cast<std::uint16_t>(~(1u << d));
     if (!cfg.boardAim || !cfg.posePed) return;
 
     // GunButton held opens GTA's weapon wheel with the gun out; the right
@@ -1519,11 +1753,7 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
         s.gunChordUsed = false;
     }
 
-    if (!s.armed) {
-        if (pressed & 0x0004) StepRadio(s, 1);  // d-pad left: next station (GTA's car layout)
-        if (pressed & 0x0008) StepRadio(s, -1); // d-pad right: previous
-        return;
-    }
+    if (!s.armed) return;
 
     const std::string_view state(s.last.state_utf8);
     // GTA's own weapon icon and ammo count, and its reticle while aiming.
@@ -1619,7 +1849,7 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
             Call<BOOL>(gta::GET_AMMO_IN_CLIP, s.ped, w, &clip);
             if (clip < clipMax) Call<BOOL>(gta::SET_AMMO_IN_CLIP, s.ped, w, std::min(clipMax, total));
         }
-        if (!s.reloadDone && clip > 0 && fireHeld && static_cast<int>(now - s.nextShot) >= 0) {
+        if (!s.reloadDone && clip > 0 && fireHeld && (!s.nextShot || static_cast<int>(now - s.nextShot) >= 0)) {
             // Target: what the reticle (screen centre) covers, from past the rider.
             const Vector3 cam = Call<Vector3>(gta::GET_GAMEPLAY_CAM_COORD);
             const Vector3 rot = Call<Vector3>(gta::GET_GAMEPLAY_CAM_ROT, 2);
@@ -1673,8 +1903,135 @@ void ReportShootings(Session& s) {
     }
 }
 
+// Snow on the ground: the Snow setting, or on Auto GTA's snow level and
+// snowy weather (XMAS, SNOW, SNOWLIGHT, BLIZZARD), looked up once a second.
+bool Snowing(const Config& cfg) {
+    if (cfg.snow != 0) return cfg.snow == 1;
+    const DWORD now = GetTickCount();
+    static DWORD next = now; // not 0: see ReadPadRaw
+    static bool snowing = false;
+    if (static_cast<int>(now - next) >= 0) {
+        next = now + 1000;
+        auto snowy = [](Hash h) { return h == 0xAAC9C895u || h == 0xEFB6EFF6u || h == 0x23FB812Bu || h == 0x27EA2814u; };
+        snowing = Call<float>(gta::GET_SNOW_LEVEL) > 0.05f || snowy(Call<Hash>(gta::GET_PREV_WEATHER_TYPE_HASH_NAME)) ||
+                  snowy(Call<Hash>(gta::GET_NEXT_WEATHER_TYPE_HASH_NAME));
+    }
+    return snowing;
+}
+
+// The tread decal: decals.dat 9100 (a script marker slot with no texture of
+// its own) patched with SK8V's groove texture (tools/build-track-texture.py),
+// written to %LOCALAPPDATA%\SkateV and registered like the native board's
+// files. GTA's own tread decals are 8-strip atlases that ADD_DECAL draws whole.
+constexpr int kTrackDecal = 9100;
+bool TrackDecalReady() {
+#if defined(SK8V_ENHANCED)
+    // This release registers its procedural texture through a private Legacy
+    // loader. Keep Enhanced inert until the texture is supplied as Gen9 DLC.
+    static const bool logged = (Log("board tracks: unavailable on Enhanced (Gen9 texture DLC preparation pending)"), true);
+    (void)logged;
+    return false;
+#else
+    static int state = 0; // 0 not registered, 1 requested, 2 patched, -1 unavailable
+    static std::uint32_t id = ~0u;
+    if (state != 0 && state != 1) return state == 2;
+    if (state == 0) {
+        if (!streaming::Ready()) return false;
+        static const unsigned char kYtd[] = {
+#include "track_texture.inc"
+        };
+        const std::filesystem::path path = g_logDir + L"skatev_tracks.ytd";
+        if (FILE* f = _wfopen(path.c_str(), L"wb")) {
+            fwrite(kYtd, 1, sizeof(kYtd), f);
+            fclose(f);
+        }
+        const std::string narrow = streaming::NarrowAnsi(path);
+        if (narrow.empty() || !streaming::Guards()) {
+            Log("board tracks: off (the texture path is not ANSI or the 3889 streaming guards differ)");
+            state = -1;
+            return false;
+        }
+        streaming::Registrar()(&id, narrow.c_str(), true, "skatev_tracks.ytd", false, false);
+        if (id == ~0u) {
+            Log("board tracks: off (the texture dictionary did not register)");
+            state = -1;
+            return false;
+        }
+        state = 1;
+    }
+    Call<void>(gta::REQUEST_STREAMED_TEXTURE_DICT, "skatev_tracks", 0);
+    if (!Call<BOOL>(gta::HAS_STREAMED_TEXTURE_DICT_LOADED, "skatev_tracks")) return false;
+    Call<void>(gta::PATCH_DECAL_DIFFUSE_MAP, kTrackDecal, "skatev_tracks", "skatev_track");
+    Logf("board tracks: decal %d wears skatev_tracks/skatev_track", kTrackDecal);
+    state = 2;
+    return true;
+#endif
+}
+
+// Track tint per GTA tread kind (board_tracks.h decal ids): the groove's colour on that ground.
+void TrackTint(int kind, float rgb[3]) {
+    static const float kTint[4][3] = {{0.72f, 0.62f, 0.48f},  // 3011 sand
+                                      {0.32f, 0.24f, 0.17f},  // 3012 mud
+                                      {0.48f, 0.38f, 0.28f},  // 3013 dirt, grass
+                                      {0.78f, 0.82f, 0.90f}}; // 3014 snow
+    const int i = std::clamp(kind - 3011, 0, 3);
+    for (int c = 0; c < 3; ++c) rgb[c] = kTint[i][c];
+}
+
+// The board in the weather: no snow on it (board_stencil.h) and tread marks
+// behind its back wheels (board_tracks.h). `pose`: the drawn native board.
+void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
+    const bool snow = Snowing(cfg);
+    // GTA's snow can come from a trainer that tells the game nothing, so the
+    // board is kept out of the snow pass whenever it is drawn.
+    boardstencil::SetActive(pose != nullptr);
+    if (!pose || !cfg.boardTracks || !TrackDecalReady()) {
+        s.tracks.Reset();
+        return;
+    }
+    // LEFT_WHEELBACK (4) and RIGHT_WHEELBACK (6); RAGE rows, translation at 12..14.
+    float wheels[2][3];
+    for (int w = 0; w < 2; ++w)
+        for (int i = 0; i < 3; ++i) wheels[w][i] = pose->world[w ? 6 : 4][12 + i];
+    const boardtracks::GroundFn ground = [](const float p[3], float depth, boardtracks::Ground& g) {
+        SvGround hit{};
+        if (!g_runtime.GroundAt({p[0], p[1], p[2]}, depth, hit)) return false;
+        g.height = hit.height;
+        g.normal[0] = hit.normal.x, g.normal[1] = hit.normal.y, g.normal[2] = hit.normal.z;
+        g.material = hit.material;
+        return true;
+    };
+    boardtracks::Mark marks[2];
+    const int n = s.tracks.Step(wheels, snow, ground, marks);
+    for (int i = 0; i < n; ++i) {
+        const boardtracks::Mark& m = marks[i];
+        constexpr float kLift = 0.005f, kSeconds = 60.0f; // on the ground: the projection depth scales with the mark
+        // Projected down the ground normal; the side vector (travel) spans the width argument
+        // and the texture's U, along which the groove is uniform.
+        float tint[3];
+        TrackTint(m.decal, tint);
+        const int decal = Call<int>(gta::ADD_DECAL, kTrackDecal, m.position[0] + m.normal[0] * kLift, m.position[1] + m.normal[1] * kLift,
+                  m.position[2] + m.normal[2] * kLift, -m.normal[0], -m.normal[1], -m.normal[2], m.direction[0],
+                  m.direction[1], m.direction[2], m.length, cfg.trackWidth, tint[0], tint[1], tint[2], 1.0f, kSeconds, 0, 0, 0);
+        ++s.trackMarks;
+        // The session's first mark: GTA's answer, and whether it still lives a second later.
+        if (!s.firstTrack.decal) {
+            s.firstTrack = {decal ? decal : -1, GetTickCount() + 1000};
+            Logf("board tracks: first mark: decal type %d at %.2f %.2f %.2f, ground normal %.2f %.2f %.2f, %.2f x %.2f m -> id %d",
+                 m.decal, m.position[0], m.position[1], m.position[2], m.normal[0], m.normal[1], m.normal[2], m.length,
+                 cfg.trackWidth, decal);
+        }
+    }
+    if (s.firstTrack.decal > 0 && s.firstTrack.checkAt && static_cast<int>(GetTickCount() - s.firstTrack.checkAt) >= 0) {
+        Logf("board tracks: first mark alive a second later: %d", Call<BOOL>(gta::IS_DECAL_ALIVE, s.firstTrack.decal));
+        s.firstTrack.checkAt = 0;
+    }
+}
+
 void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
+    Lap(kPartLifecycle);
     DisableSkateControls(pad.buttons, s.aiming);
+    Lap(kPartControls);
     if (s.nativeFire != 1) ReportShootings(s); // GTA reports the crimes of its own shots
     {
         // Riding into another map state's reach (twice a second).
@@ -1712,29 +2069,42 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     in.aspect_ratio = Call<float>(gta::GET_ASPECT_RATIO, 0);
     in.pad = pad;
     BoardControls(s, cfg, in.pad);
-    if (cfg.dynamicWorld) {
+    Lap(kPartInput);
+    // Skate steps at 60 Hz on the same game time: GTA's moving entities are
+    // gathered on the frames a step falls due, as fresh as before, not on
+    // every rendered frame (at 185 fps the pool scan, its natives and the
+    // runtime's prop triangles ran three times per step).
+    constexpr float kStep = 1.0f / 60.0f;
+    s.dynamicDue = (std::min)(s.dynamicDue + in.dt_seconds, 1.0f);
+    const bool gather = s.dynamicDue >= kStep;
+    if (gather) s.dynamicDue = (std::min)(s.dynamicDue - kStep, kStep);
+    if (cfg.dynamicWorld && gather) {
         // Moving GTA entities near the skater, for Skate's contact code.
         s.world.SetPedParts(cfg.pedHitboxes);
         s.world.SetPedLaunch(cfg.pedLaunch, cfg.pedLaunchScale, cfg.pedLaunchLift, cfg.pedLaunchSpin);
         s.world.SetPedVoices(cfg.pedPain, cfg.pedGetUpSpeech);
         s.world.SetVehicleDamage(cfg.vehicleDamage, cfg.vehicleDamageScale, cfg.vehicleDamageMin, cfg.vehicleDamageRadius);
         s.world.Gather(s.ped, s.last.board_position, cfg.dynamicRadius, boardnative::Entity());
+        if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         const auto& bodies = s.world.Bodies();
         g_runtime.SetDynamicBodies(bodies.data(), static_cast<std::uint32_t>(bodies.size()));
-        NearMiss(s, cfg, bodies);
         if (cfg.pedHitboxes) {
             const auto& parts = s.world.PedParts();
             g_runtime.SetPedParts(parts.data(), static_cast<std::uint32_t>(parts.size()));
         }
     }
+    if (cfg.dynamicWorld) NearMiss(s, cfg, s.world.Bodies());
+    Lap(kPartWorld);
     g_runtime.Step(in);
 
     SvOutput o{};
     if (!g_runtime.Output(o) || o.tick == 0) {
+        s.last.status = o.status; // the lifecycle's error check reads it
         pedcollision::Tick(s.ped, nullptr, 0);
         return;
     }
     s.last = o;
+    Lap(kPartStep);
 
     {
         // The skater's own voice, in GTA's pattern for a fall: the falling
@@ -1866,6 +2236,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         if (cfg.liveClip && s_skeleton) liveclip::Tick(s.ped, s_skeleton, Log);
     }
 
+    Lap(kPartPose);
     if (o.camera_valid) {
         Call<void>(gta::SET_CAM_COORD, s.cam, o.camera_position.x, o.camera_position.y, o.camera_position.z);
         Call<void>(gta::SET_CAM_ROT, s.cam, o.camera_rotation.x, o.camera_rotation.y, o.camera_rotation.z, 2);
@@ -1880,6 +2251,17 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         Call<void>(gta::SET_CAM_FOV, s.cam, 60.0f);
     }
 
+    // Dev A/B (GtaCamera): GTA's gameplay camera renders instead of the script
+    // camera (as while aiming), so the frame report compares the two.
+    const bool gtaCam = cfg.gtaCamera && !s.aiming && !s.wheelOpen;
+    if (gtaCam != s.gtaCam) {
+        s.gtaCam = gtaCam;
+        if (gtaCam) GameplayCam(s);
+        else if (!s.aiming && !s.wheelOpen) Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kAimBlendMs, 1, 0, 0);
+    }
+    g_gtaCamFrames += s.gtaCam;
+
+    Lap(kPartCamera);
     if (cfg.dynamicWorld) {
         SvDynamicHit hits[16];
         const std::uint32_t n = g_runtime.DynamicHits(hits, 16);
@@ -1897,27 +2279,29 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         if (util::g_verbose && now - lastWorldLog >= 10000) {
             lastWorldLog = now;
             const auto& w = s.world.Stats();
-            Logf("SkateV Legacy: dynamic collision exact=%u missingTemplates=%u vehicles=%u peds=%u (as ragdoll parts %u, %zu parts) objects=%u doors=%u contacts=%u exchanged=%u (ped impulses %u)",
+            Logf("SkateV Legacy: dynamic collision exact=%u missingTemplates=%u vehicles=%u peds=%u (as ragdoll parts %u, %zu parts) objects=%u doors=%u contacts=%u exchanged=%u (ped impulses %u), %u pooled entities scanned",
                  w.exactBounds, w.missingBounds, w.vehicles, w.peds, w.pedParts, s.world.PedParts().size(),
-                 w.objects, w.doors, w.hits, w.exchanged, w.pedImpulses);
+                 w.objects, w.doors, w.hits, w.exchanged, w.pedImpulses, w.pooled);
+            const boardstencil::Stats b = boardstencil::Take();
+            Logf("SkateV Legacy: board weather: snow %s; indexed draws %u immediate, %u deferred; board draws %u, into the G-buffer %u, kept clean %u; %u track marks laid",
+                 Snowing(cfg) ? "on" : "off", b.immediate, b.deferred, b.seen, b.gbuffer, b.marked, std::exchange(s.trackMarks, 0u));
         }
     }
 
+    Lap(kPartWorld);
     SvBoardPose boardPose{};
     const bool nativeBoard = cfg.drawBoard && g_runtime.BoardPose(boardPose)
         && boardnative::Tick(true, boardPose);
     if (!cfg.drawBoard || boardPose.bone_count != 7) boardnative::Tick(false, SvBoardPose{});
+    BoardWeather(s, cfg, nativeBoard ? &boardPose : nullptr);
     if (cfg.drawSkater && !nativeBoard) DrawBoardMesh();
     if (g_quirkRequested.exchange(false) && cfg.backwardsMan) g_runtime.TriggerQuirk(0);
-    SvQuirkState quirk{};
-    if (g_runtime.QuirkState(quirk) && quirk.assist_phase != 0) {
-        Text(quirk.assist_phase == 6 ? "BACKWARDS MAN" : "backwards man...", 0.5f, 0.2f, 0.55f, 255, 120, 40, true);
-    }
     if (cfg.showDebug) { // dev only; the player sees hud_overlay
         SvScoreState score{};
         g_runtime.Score(score);
         DrawHud(o, score, true);
     }
+    Lap(kPartBoard);
 }
 
 // One script frame of the lifecycle state machine (lifecycle.h). `f6`: the
@@ -1925,6 +2309,10 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
 // controller confirmation window; leave immediately, forced).
 void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
     const DWORD now = GetTickCount();
+    // No script frames for a while (Rockstar Editor, a pause that stops scripts): the state's
+    // timeouts don't count that time (a 52 s gap timed out a take-out at once, 2026-10-11).
+    if (s.lastLifecycleFrame && now - s.lastLifecycleFrame > 1000) s.stateSince += now - s.lastLifecycleFrame;
+    s.lastLifecycleFrame = now;
     const Ped player = Call<Ped>(gta::PLAYER_PED_ID);
     if (s.teleportWait && s.state != LifeState::Waiting) {
         // After a teleport: Skate took the ped back (it is held) or the wait ended (GTA's again).
@@ -2066,14 +2454,22 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
             Leave(s, cfg, "player character changed or removed", false);
             break;
         }
-        SvOutput o{};
-        g_runtime.Output(o);
+        // The output UpdateActive read last frame: sv_get_output blends the
+        // whole pose, and these checks need only its status and tick.
+        const SvOutput& o = s.last;
         const bool dead = Call<BOOL>(gta::IS_ENTITY_DEAD, s.ped, 0);
+        if (o.tick != s.watchTick) s.watchTick = o.tick, s.watchSince = now, s.watchFrames = 0;
+        const bool stalled = ++s.watchFrames > 120 && now - s.watchSince > 5000;
         if (o.status == SV_STATUS_ERROR) {
             Leave(s, cfg, "runtime error", false);
             Notify(s, "Skate runtime error: " + g_runtime.StatusText(), 8000);
         } else if (dead || Call<BOOL>(gta::NETWORK_IS_SESSION_STARTED)) {
             Leave(s, cfg, dead ? "player died" : "network session", false);
+        } else if (stalled) {
+            // A runtime that stops stepping would hold the player forever.
+            Logf("SkateV Legacy: Skate output stuck at tick %llu for %lu ms (%s)", static_cast<unsigned long long>(o.tick),
+                 now - s.watchSince, g_runtime.StatusText().c_str());
+            Leave(s, cfg, "Skate stopped responding", false);
         } else if (f6 || heldAway) {
             s.yHeldSince = 0, s.yWasDown = true;
             Leave(s, cfg, heldAway ? "board put away (Y held)" : "menu", true);
@@ -2149,7 +2545,7 @@ void ApplyQuirk() {
     q.chord = c.backwardsManChord;
     q.remount_delay = c.backwardsManRemountDelay;
     q.model = 2; // Retail, the only model the runtime has
-    q.backward = c.backwardsManBackward ? 1u : 0u;
+    q.backward = 1;
     g_runtime.ConfigureQuirk(q);
 }
 
@@ -2166,6 +2562,16 @@ std::string LimitText(float v) {
     return v < 0.0f ? "Skate's own" : v == 0.0f ? "None" : Fixed("%g s")(v);
 }
 
+// One d-pad direction's gesture: None or one of kGestures.
+menu::Item Emote(const char* label, int direction, const Config& D) {
+    std::vector<std::string> values{"None"};
+    values.insert(values.end(), std::begin(kGestures), std::end(kGestures));
+    menu::Item i = menu::Choice(label, kGestureKeys[direction], values, values,
+                                Bound(kGestureKeys[direction], [] { g_runtime.SetGestures(g_config.gestures); }));
+    i.def = D.gestures[direction] < 0 ? "None" : kGestures[D.gestures[direction]];
+    return i;
+}
+
 std::vector<menu::Page> MenuPages(Session& s) {
     using namespace menu;
     const Config D{};
@@ -2179,6 +2585,17 @@ std::vector<menu::Page> MenuPages(Session& s) {
                Bound("Difficulty", [] { g_runtime.SetDifficulty(g_config.difficulty); })),
         Choice("Camera", "Camera", {"High", "Low"}, {"High (Skate 3 default)", "Low"},
                Bound("Camera", [] { g_runtime.SetCameraType(g_config.cameraType); })),
+        Emote("Emote: d-pad up", 0, D), Emote("Emote: d-pad down", 1, D),
+        Emote("Emote: d-pad left", 2, D), Emote("Emote: d-pad right", 3, D),
+        Choice("Posture", "Posture", {"Normal", "Stiff", "Slouch", "Buff"}, {"Normal", "Stiff", "Slouch (hunched)", "Buff"},
+               Bound("Posture", [] { g_runtime.SetPosture(g_config.posture); })),
+        Choice("Riding style", "RidingStyle", {"Default", "Loose", "Gonzo", "Aggressive"},
+               {"Default", "Loose", "Gonzo", "Aggressive"},
+               Bound("RidingStyle", [] { g_runtime.SetRidingStyle(g_config.ridingStyle); })),
+        Number("Truck tightness", "TruckTightness", D.truckTightness, 0, 1, 0.05f, Fixed("%.2f"),
+               Bound("TruckTightness", [] { g_runtime.SetEquipment(g_config.truckTightness, g_config.wheelHardness); })),
+        Number("Wheel hardness", "WheelHardness", D.wheelHardness, 0, 1, 0.05f, Fixed("%.2f"),
+               Bound("WheelHardness", [] { g_runtime.SetEquipment(g_config.truckTightness, g_config.wheelHardness); })),
         Flag("Ramp lip rule", "LipRule", D.lipRule, Bound("LipRule", [] { g_runtime.SetLipRule(g_config.lipRule); })),
         Number("Air time limit", "AirTimeLimit", D.airTimeLimit, -1, 120, 5, LimitText,
                Bound("AirTimeLimit", [] { g_runtime.SetAirLimit(g_config.airTimeLimit); })),
@@ -2192,6 +2609,9 @@ std::vector<menu::Page> MenuPages(Session& s) {
                [](float v) { return v == 0.0f ? std::string("Off") : Fixed("%.0f ms")(v); }, Bound("PutAwayHoldMs")),
         Flag("Shooting on the board", "BoardAim", D.boardAim, Bound("BoardAim")),
         Number("Camera FOV scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
+        Choice("Board tracks", "BoardTracks", {"1", "0"}, {"On", "Off"}, Bound("BoardTracks")),
+        Choice("Snow", "Snow", {"0", "1", "2"}, {"Auto (GTA's snow and weather)", "Always (a trainer's snow)", "Never"},
+               Bound("Snow")),
     }});
 
     pages.push_back({"Hall of Meat and records", {
@@ -2226,8 +2646,6 @@ std::vector<menu::Page> MenuPages(Session& s) {
 
     pages.push_back({"BackwardsMan", {
         Flag("BackwardsMan assist", "BackwardsMan", D.backwardsMan, Bound("BackwardsMan", ApplyQuirk)),
-        Choice("Direction", "BackwardsManDirection", {"Backward", "Forward"}, {"Backward", "Forward"},
-               Bound("BackwardsManDirection", ApplyQuirk)),
         Number("Remount delay", "BackwardsManRemountDelay", static_cast<float>(D.backwardsManRemountDelay), 0, 30, 1, Fixed("%.0f"),
                Bound("BackwardsManRemountDelay", ApplyQuirk)),
         Action("Trigger now", [&s] {
@@ -2250,7 +2668,10 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Chord("Fire", "FireButton", D.fireButton, false, Bound("FireButton")),
         Chord("BackwardsMan", "BackwardsManChord", D.backwardsManChord, false, Bound("BackwardsManChord", ApplyQuirk)),
         Flag("Skate during missions", "BoardActionInMissions", D.life.inMissions, Bound("BoardActionInMissions")),
+        Flag("Radio on LB + d-pad", "RadioControls", D.radioControls, Bound("RadioControls")),
         Flag("Original Skate HUD", "Hud", true, {}, true),
+        Flag("Trick Analyzer", "TrickAnalyzer", D.trickAnalyzer,
+             Bound("TrickAnalyzer", [] { hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer); })),
     }});
 
     pages.push_back({"Dev", {
@@ -2260,9 +2681,11 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Number("Gun IK (0 off, 1 arms, 2 arms+torso+head)", "GunIK", static_cast<float>(D.gunIk), 0, 2, 1, Fixed("%.0f"), Bound("GunIK")),
         Number("Aim twist limit", "AimTwist", D.aimTwist, 20, 180, 10, Fixed("%.0f deg"), Bound("AimTwist")),
         Flag("Log GTA's gun state", "GunProbe", D.gunProbe, Bound("GunProbe")),
+        Flag("Skate with GTA's camera (frame cost A/B)", "GtaCamera", D.gtaCamera, Bound("GtaCamera")),
         Flag("Debug text HUD", "ShowDebug", D.showDebug, Bound("ShowDebug")),
         Flag("Verbose log", "VerboseLog", D.verboseLog, Bound("VerboseLog", [] { util::g_verbose = g_config.verboseLog; g_runtime.SetVerboseLog(g_config.verboseLog); })),
         Number("Ped Z offset", "PedZOffset", D.pedZOffset, 0, 2, 0.05f, Fixed("%.2f m"), Bound("PedZOffset")),
+        Number("Track width", "TrackWidth", D.trackWidth, 0.02f, 0.5f, 0.02f, Fixed("%.2f m"), Bound("TrackWidth")),
         Number("Bail hit speed", "BailHitSpeed", D.bailHitSpeed, 0, 20, 0.5f, Fixed("%.1f m/s"), Bound("BailHitSpeed")),
         Number("Bail scream speed", "BailScreamSpeed", D.bailScreamSpeed, 0, 40, 1, Fixed("%.0f m/s"), Bound("BailScreamSpeed")),
         Number("Struck ped pain reason", "PedPain", static_cast<float>(D.pedPain), -1, 20, 1, Fixed("%.0f"), Bound("PedPain")),
@@ -2336,6 +2759,8 @@ void ScriptMain() {
         ApplyQuirk();
         Logf("SkateV Legacy: BackwardsMan %s chord %04x", cfg.backwardsMan ? "on" : "off", cfg.backwardsManChord);
         hudoverlay::Start(g_gameDir + L"SkateVLegacy.ini", g_runtime.Handle(), Log);
+        hudoverlay::SetTrickAnalyzer(cfg.trickAnalyzer);
+        boardstencil::Start(Log);
         recordsui::Start(g_runtime.Handle(), Log);
         Logf("SkateV Legacy: Hall of Meat %s (%s)", cfg.hallOfMeat ? "on" : "off",
              g_runtime.SetHallOfMeat(cfg.hallOfMeat) ? "runtime toggle present" : "runtime toggle absent");
@@ -2354,6 +2779,14 @@ void ScriptMain() {
              g_runtime.SetDifficulty(cfg.difficulty) ? "runtime option present" : "runtime option absent");
         Logf("SkateV Legacy: camera %s (%s)", cfg.cameraType == 0 ? "Low" : "High",
              g_runtime.SetCameraType(cfg.cameraType) ? "runtime option present" : "runtime option absent");
+        Logf("SkateV Legacy: emotes up %d down %d left %d right %d (%s)", cfg.gestures[0], cfg.gestures[1],
+             cfg.gestures[2], cfg.gestures[3],
+             g_runtime.SetGestures(cfg.gestures) ? "runtime option present" : "runtime option absent");
+        Logf("SkateV Legacy: posture %s, riding style %s, trucks %.2f, wheels %.2f (%s)", kPostures[cfg.posture],
+             kRidingStyles[cfg.ridingStyle], cfg.truckTightness, cfg.wheelHardness,
+             g_runtime.SetPosture(cfg.posture) && g_runtime.SetRidingStyle(cfg.ridingStyle) &&
+                     g_runtime.SetEquipment(cfg.truckTightness, cfg.wheelHardness)
+                 ? "runtime option present" : "runtime option absent");
         g_runtime.SetVerboseLog(cfg.verboseLog);
     }
 
@@ -2377,6 +2810,7 @@ void ScriptMain() {
     size_t lineIndex = 0;
     for (;;) {
         const double workStart = monitor.Now();
+        LapStart();
         const bool f6 = g_toggleRequested.exchange(false);
         {
             static bool showList = false;
@@ -2425,6 +2859,7 @@ void ScriptMain() {
                 Call<void>(gta::HUD_FORCE_WEAPON_WHEEL, 0);
             }
             EnforceHeldPed(s);
+            Lap(kPartAfter);
         } else if (f6) {
             Notify(s, "runtime unavailable: " + error);
         }
@@ -2433,17 +2868,30 @@ void ScriptMain() {
             Text(s.message.c_str(), 0.5f, 0.88f, 0.4f, 255, 255, 255, true);
         }
         hudoverlay::Tick(s.state == LifeState::Skating);
-        if (s.board.Pressed(RawPadButtons(), cfg.life.menuButton)) g_menuToggle.store(true);
+        Lap(kPartHud);
+        const auto raw = static_cast<std::uint16_t>(RawPadButtons());
+        if (s.board.Pressed(raw, cfg.life.menuButton)) g_menuToggle.store(true);
+        // GTA's interaction menu (INPUT_INTERACTION_MENU, Back) shares Back with the board's
+        // weapon wheel and the menu chord: blocked while either is held and just after.
+        const bool chord = cfg.life.menuButton && (raw & cfg.life.menuButton) == cfg.life.menuButton;
+        if (chord || menu::IsOpen() || (s.state == LifeState::Skating && (raw & cfg.gunButton)))
+            s.backBlockUntil = GetTickCount() + 500;
+        if (static_cast<int>(GetTickCount() - s.backBlockUntil) < 0)
+            for (int group : {0, 2}) Call<void>(gta::DISABLE_CONTROL_ACTION, group, 244, 1);
         if (g_menuToggle.exchange(false)) {
             if (recordsui::Showing()) recordsui::NextPage();  // '/' also closes the records board
             else menu::Toggle();
         }
         menu::Tick();
+        Lap(kPartMenu);
         recordsui::Tick(s.state == LifeState::Skating,
                         g_hallOfMeatOn && std::string_view(s.last.state_utf8).rfind("Wipeout", 0) == 0);
-        if (s.state != LifeState::Skating) boardnative::Tick(false, SvBoardPose{});
+        if (s.state != LifeState::Skating) boardnative::Tick(false, SvBoardPose{}), boardstencil::SetActive(false);
+        Lap(kPartRecords);
         gtaaudio::Tick(s.state == LifeState::Skating);
+        Lap(kPartAudio);
         physlevel::Tick();
+        Lap(kPartLevel);
         monitor.Work(monitor.Now() - workStart);
         WAIT(0);
         if (cfg.stallSampler) stall::Beat();
@@ -2475,6 +2923,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         keyboardHandlerUnregister(Keyboard);
         scriptUnregister(module);
         hudoverlay::Shutdown(reserved != nullptr);
+        boardstencil::Stop();
         // reserved != nullptr: the process is exiting; let the OS reclaim.
         // Otherwise release the handle; the runtime DLL itself stays mapped
         // because its worker thread exits asynchronously.

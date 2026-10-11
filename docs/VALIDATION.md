@@ -1,8 +1,37 @@
 # Validation
 
-Target: Enhanced **1.0.1158.16**, Windows x64; upstream SK8V **1.0.9 / 15b9a3b**.
+Target: Enhanced **1.0.1158.16**, Windows x64; current upstream SK8V **1.1.8 / 9fbef44**.
 
-## Live checks
+## 1.1.8 source-update checks (2026-10-11)
+
+- All 49 engine patches apply to the pinned adoption source; upstream commit pins are unchanged.
+- Enhanced release host and HUD addon build; **7/7 C++ checks** pass, including a new gate that links the Enhanced stencil exclusion without D3D11/ScriptHook dependencies.
+- Release-mode Rust unit checks: **183 passed, 0 failed, 2 ignored** (21 HUD, 139 runtime, 23 collision-format tests). The ignored tests exercise an intentional fault and an owner-only ground fixture benchmark.
+- Eight live-reader tests cover both layouts, including the new Enhanced nearby-change/rebuild regression.
+- Matching release runtime, audio decoder and preparation tools build successfully.
+- Mixed-version check: the new host bridge rejects the old runtime and names all five missing exports.
+- New runtime smoke check: **600** finite Franklin poses, board/camera/HUD publications; Michael and Trevor skeleton changes also pass (317 / 354 / 282 bones). The seven-bone board travels **35.4604 m**, with maximum riding separation **0.244375 m**, on a process-local synthetic Enhanced floor.
+- HUD rasterization: 51 textures, 19 draw commands and 6,689 visible pixels. Audio: **2,702,592** samples, positive energy, zero pull underruns. New gesture/posture/style/equipment exports and ground-height/normal/material publication pass.
+- No x-ray vertices were produced by this particular run; it does not validate live bail/x-ray presentation. The optional newly prepared Trick Analyzer movie was absent in the older owned-data fixture.
+- Python/PowerShell syntax and the **361-file** public artifact/credential audit pass.
+- Installed ASI and runtime hashes still match the previous live checkpoint; no game installation was changed.
+
+Locally built 1.1.8 hashes (not distributed binaries; rebuild metadata can differ):
+
+```text
+SkateVEnhanced.asi
+c413eaf4727946fd16466ae948128f4c10c9654d349a6ede240c32a0838487a3
+SkateVRuntime.dll
+aff3bda9645d94f5c42777448d1eead8a33bfdf82cefb5821e90992438a5cdce
+```
+
+The 1.1.8 update has **not** been installed into GTA or live-tested in Story Mode. The Legacy D3D11 snow stencil and Legacy loose track-texture registration are deliberately excluded on Enhanced. [Upgrade notes](UPSTREAM-1.1.8.md) describe those limits and data preparation.
+
+## Previous 1.0.9 Enhanced live checkpoint
+
+The following live observations and installed hashes belong to the initial port (`d9b0cb6`, upstream `15b9a3b`); they are not evidence of 1.1.8 live stability.
+
+### Live checks
 
 - Animation: Franklin's 317-bone buffer; two worker layouts with 3,387 and 2,258 matches, zero mismatched counts.
 - Resources: native board, dictionary and weapon loaded; all seven board bone tags/parents matched.
@@ -12,7 +41,7 @@ Target: Enhanced **1.0.1158.16**, Windows x64; upstream SK8V **1.0.9 / 15b9a3b**
 
 An extended session also logged `Nonfinite grab query`; skating exited and GTA tasks were restored. This remains open, alongside performance comparisons, complete surface coverage and wider dynamic interaction testing.
 
-## Headless integration
+### Previous headless integration
 
 Actual runtime DLL and converted data, one session on a synthetic Enhanced floor:
 
@@ -28,7 +57,7 @@ Actual runtime DLL and converted data, one session on a synthetic Enhanced floor
 
 Original scoring HUD was rasterized through D3D11 WARP. Synthetic floor results do not establish whole-map performance or full x-ray rendering.
 
-## Code gates
+### Previous publication gates
 
 Development passed seven C++ gates, including a private Franklin capture replay. Public source runs six asset-free gates; image/body audits are optional with each developer's own ignored fixtures. Seven Rust reader tests cover sparse records, bounds, tagged instances, streaming replacement, geometry/material placement, mover filtering and unchanged Legacy decoding. Retail fixtures are not supplied or downloaded by tests.
 

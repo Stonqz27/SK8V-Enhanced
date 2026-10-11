@@ -35,15 +35,15 @@ NEW, OLD = '.sk8v-new', '.sk8v-old'
 DATA = 'SK8V'  # the prepared data (tools/prepare.py), a folder in the GTA folder
 # INI keys the in-game menu saves: a reinstall keeps the player's value.
 MENU_KEYS = [
-    'Difficulty', 'Camera', 'LipRule', 'AirTimeLimit', 'BailTimeLimit', 'SkitchStandoff', 'GtaDelegation', 'SwimDepth', 'PutAwayHoldMs',
-    'BoardAim', 'GunIK', 'GunProbe', 'AimTwist', 'CameraFovScale', 'HallOfMeat', 'HallOfMeatMetrics',
+    'Difficulty', 'Camera', 'EmoteUp', 'EmoteDown', 'EmoteLeft', 'EmoteRight', 'Posture', 'RidingStyle', 'TruckTightness', 'WheelHardness', 'LipRule', 'AirTimeLimit', 'BailTimeLimit', 'SkitchStandoff', 'GtaDelegation', 'SwimDepth', 'PutAwayHoldMs',
+    'BoardAim', 'GunIK', 'GunProbe', 'GtaCamera', 'AimTwist', 'CameraFovScale', 'HallOfMeat', 'HallOfMeatMetrics',
     'HallOfMeatXray', 'BailPain', 'GetUpSpeech', 'NearMissSpeech', 'DynamicWorld', 'DynamicRadius', 'PedHitboxes',
     'PedLaunch', 'PedLaunchScale', 'PedLaunchLift', 'PedLaunchSpin', 'PedGetUpSpeech', 'VehicleDamage',
-    'VehicleDamageScale', 'BackwardsMan', 'BackwardsManDirection', 'BackwardsManRemountDelay', 'BackwardsManChord',
+    'VehicleDamageScale', 'BackwardsMan', 'BackwardsManRemountDelay', 'BackwardsManChord',
     'AudioMasterGain', 'AudioOutput', 'MenuButton', 'GunButton', 'AimButton', 'FireButton', 'BoardActionInMissions',
     'Hud', 'ShowDebug', 'VerboseLog', 'PedZOffset', 'BailHitSpeed', 'BailScreamSpeed', 'PedPain', 'VehicleDamageMin',
     'VehicleDamageRadius', 'BackgroundPrepare', 'Runtime', 'StallSampler', 'BoardNative', 'DrawBoard', 'PosePed',
-    'AudioGtaPlacement', 'AudioEditorTone', 'AudioGtaGainDb']
+    'AudioGtaPlacement', 'AudioEditorTone', 'AudioGtaGainDb', 'BoardTracks', 'Snow', 'RadioControls', 'TrickAnalyzer']
 
 
 class SetupError(Exception):

@@ -52,7 +52,8 @@ Rust crates
 
 Enhanced compatibility port
   Maintained by Stonqz27, 2026.
-  Based on becaring/SK8V 1.0.9 at commit 15b9a3b7a4148cfd1fa233e4aac2034574cfe880.
+  Based on becaring/SK8V 1.1.8 at commit 9fbef449b51178521495d3f9dd90c91f98f7fe18.
+  Initial Enhanced adaptations were made against SK8V 1.0.9 (15b9a3b).
   Modified host, live collision reader, skeleton handling, native board/DLC
   preparation, Direct3D 12 presentation and native audio integration.
   Additional build/test/documentation changes make the public source checkout

@@ -207,7 +207,12 @@ function Start-Prepare {
   $env:PYTHONIOENCODING = 'utf-8'
   # The downloaded copy ignores the user's site-packages (they may hold other numpy/Pillow versions);
   # the player's own Python keeps them, since that is often where pip --user put numpy and Pillow.
-  $env:PYTHONNOUSERSITE = $(if ($py -eq (Join-Path $Root 'python\python.exe')) { '1' } else { $null })
+  $bundled = $py -eq (Join-Path $Root 'python\python.exe')
+  $env:PYTHONNOUSERSITE = $(if ($bundled) { '1' } else { $null })
+  # PYTHONHOME pins the downloaded copy to its own folder. Without it (and without the ._pth get-python
+  # removes) it adds a registered Python 3.13's Lib and DLLs from the registry ahead of its own and loads
+  # that install's modules: "DLL load failed while importing _ctypes" next to an Anaconda install.
+  if ($bundled) { $env:PYTHONHOME = Join-Path $Root 'python'; $env:PYTHONPATH = $null }
   $status.Text = 'Starting...'
   Start-Logged @($py, '-B', '-u', (Join-Path $Root 'tools\prepare.py'), '--skate', $skate.Text,
                  '--gta', $gta.Text, '--stance', $stance.SelectedItem, '--install', '--clean')

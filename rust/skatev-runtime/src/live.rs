@@ -176,6 +176,44 @@ struct Bvh {
     rows: [Vec3; 4],
     identity: bool,
     spare: bool,
+    /// Box centre (GTA XY) and half-diagonal, for the reach test.
+    at: [f32; 2],
+    reach: f32,
+}
+
+/// A bound an area was built from: its identity (instance and bound
+/// addresses) and where it sits, so streaming near the skater can be told
+/// from streaming at the area's edge (`changed_near`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seen {
+    pub id: u64,
+    pub at: [f32; 2],
+    pub reach: f32,
+}
+
+impl Bvh {
+    fn id(&self) -> u64 {
+        let mut h = (self.inst as u64) ^ (self.bound as u64).rotate_left(23);
+        h = (h ^ (h >> 33)).wrapping_mul(0xff51_afd7_ed55_8ccd);
+        h ^ (h >> 29)
+    }
+
+    fn seen(&self) -> Seen {
+        Seen { id: self.id(), at: self.at, reach: self.reach }
+    }
+}
+
+/// GTA streamed collision in or out within `half` (plus the walk's EDGE and
+/// the bound's own reach, the walk's rule) of `centre` since the area holding
+/// `built` was walked: a bound there now that the build did not read, or one
+/// the build read that is gone. `now` is `Level::near(centre, half)`, sorted.
+pub fn changed_near(built: &[Seen], now: &[u64], centre: [f32; 2], half: f32) -> bool {
+    let had = |id: &u64| built.iter().any(|b| b.id == *id);
+    now.iter().any(|id| !had(id))
+        || built.iter().any(|b| {
+            let margin = half + EDGE + b.reach;
+            (b.at[0] - centre[0]).abs() <= margin && (b.at[1] - centre[1]).abs() <= margin && now.binary_search(&b.id).is_err()
+        })
 }
 
 /// What the walk does with bounds of these flags: `Some(false)` walkable,
@@ -333,7 +371,7 @@ impl Level {
                     census.in_range += 1;
                     if let Some(spare) = usage(ty, inc) {
                         let identity = rows[0] == Vec3::X && rows[1] == Vec3::Y && rows[2] == Vec3::Z && rows[3] == Vec3::ZERO;
-                        each(Bvh { inst, bound: bound as usize, kind: bh[0x10], rows, identity, spare });
+                        each(Bvh { inst, bound: bound as usize, kind: bh[0x10], rows, identity, spare, at: [at.x, at.y], reach });
                     } else {
                         census.filtered += 1;
                     }
@@ -349,7 +387,7 @@ impl Level {
                 return;
             };
             let identity = rows[0] == Vec3::X && rows[1] == Vec3::Y && rows[2] == Vec3::Z && rows[3] == Vec3::ZERO;
-            each(Bvh { inst, bound: bound as usize, kind: BOUND_BVH, rows, identity, spare });
+            each(Bvh { inst, bound: bound as usize, kind: BOUND_BVH, rows, identity, spare, at: [at.x, at.y], reach });
         })
     }
 
@@ -437,23 +475,19 @@ impl Level {
         Ok(out.join("; "))
     }
 
-    /// A cheap fingerprint of which static bounds are loaded near `centre`
-    /// (instance and bound addresses): it changes when GTA streams collision
-    /// in or out, not when anything moves.
-    pub fn signature(&self, centre: [f32; 2], half: f32) -> Result<u64, String> {
-        let mut sig = 0u64;
-        let mut census = Census::default();
-        self.bvh_in_reach(centre, half, &mut census, |b| {
-            let mut h = (b.inst as u64) ^ (b.bound as u64).rotate_left(23);
-            h = (h ^ (h >> 33)).wrapping_mul(0xff51_afd7_ed55_8ccd);
-            sig = sig.wrapping_add(h ^ (h >> 29));
-        })?;
-        Ok(sig)
+    /// The static bounds loaded within `half` of `centre` (by the walk's
+    /// reach rule), sorted ids (`Seen::id`) for `changed_near`.
+    pub fn near(&self, centre: [f32; 2], half: f32) -> Result<Vec<u64>, String> {
+        let mut ids = Vec::new();
+        self.bvh_in_reach(centre, half, &mut Census::default(), |b| ids.push(b.id()))?;
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
     }
 
     /// Triangles of the static map within `half` of `centre` (GTA space),
-    /// plus what was found.
-    pub fn walk(&self, centre: [f32; 2], half: f32) -> Result<(Vec<Tri>, Census), String> {
+    /// plus what was found and the bounds read.
+    pub fn walk(&self, centre: [f32; 2], half: f32) -> Result<(Vec<Tri>, Census, Vec<Seen>), String> {
         let mut census = Census::default();
         let mut tris = Vec::new();
         let mut found = Vec::new();
@@ -484,7 +518,7 @@ impl Level {
         census.over_ground = svwc::clean::drop_over_ground(&mut tris);
         census.filled = svwc::clean::fill_gaps(&mut tris, extra);
         self.validate_owner()?; // also cover streaming while geometry was decoded
-        Ok((tris, census))
+        Ok((tris, census, found.iter().map(Bvh::seen).collect()))
     }
 }
 
@@ -546,7 +580,7 @@ fn composite(bound: usize, rows: [Vec3; 4], inst: usize, depth: u8, centre: [f32
             BOUND_BVH | 4 | 0 | 1 | 3 | 12 | 13 => {
                 census.children_used += !spare as usize;
                 let identity = placed[0] == Vec3::X && placed[1] == Vec3::Y && placed[2] == Vec3::Z && placed[3] == Vec3::ZERO;
-                each(Bvh { inst, bound: child as usize, kind, rows: placed, identity, spare });
+                each(Bvh { inst, bound: child as usize, kind, rows: placed, identity, spare, at: [at.x, at.y], reach });
             }
             _ => {}
         }
@@ -710,12 +744,40 @@ mod tests {
         }
         let owner = enhanced_owner(&table, 2);
         let level = Level::enhanced(owner.at() as usize, (0x1000, 0x7FFF_0000_0000)).unwrap();
-        let (triangles, census) = level.walk([10.0, 20.0], 128.0).unwrap();
+        let (triangles, census, _) = level.walk([10.0, 20.0], 128.0).unwrap();
         assert_eq!((census.slots, census.bvh, census.in_range), (2, 2, 2));
         assert_eq!(census.spare, 1);
         assert!(triangles.iter().any(|t| t.material == 4));
         assert!(triangles.iter().any(|t| t.material == 17));
         assert!(triangles.iter().flat_map(|t| t.v).all(|p| p[2] >= 30.0));
+    }
+
+    #[test]
+    fn enhanced_nearby_streaming_changes_use_owned_records_and_ignore_distant_churn() {
+        let verts = [[0i16, 0, 0], [4, 0, 0], [0, 4, 0], [4, 4, 2]];
+        let map = bvh(0, (0x3e, 0x07f3_bec0), [10.0, 20.0, 30.0], &verts);
+        let far = bvh(1, (0x3e, 0x07f3_bec0), [9000.0, 300.0, 30.0], &verts);
+        let late = bvh(2, (0x3e, 0x07f3_bec0), [12.0, 22.0, 30.0], &verts);
+        let mut table = Mem::new(3 * STRIDE);
+        // A stale Legacy prefix must not participate in the new near/seen API.
+        table.put(0, &(late.inst.at() | 2).to_le_bytes());
+        table.put(0x20, &(map.inst.at() | 2).to_le_bytes());
+        table.put(STRIDE + 0x20, &(far.inst.at() | 2).to_le_bytes());
+        let mut owner = enhanced_owner(&table, 3);
+        let level = Level::enhanced(owner.at() as usize, (0x1000, 0x7FFF_0000_0000)).unwrap();
+        let (_, _, built) = level.walk([10.0, 20.0], 128.0).unwrap();
+        assert_eq!(built.len(), 1);
+        let changed = |level: &Level| changed_near(&built, &level.near([10.0, 20.0], 16.0).unwrap(), [10.0, 20.0], 16.0);
+        assert!(!changed(&level));
+        table.put(2 * STRIDE + 0x20, &(late.inst.at() | 2).to_le_bytes());
+        assert!(changed(&level), "new nearby collision must be rebuilt");
+        table.put(2 * STRIDE + 0x20, &0u64.to_le_bytes());
+        table.put(STRIDE + 0x20, &0u64.to_le_bytes());
+        assert!(!changed(&level), "distant streaming must not force a local rebuild");
+        table.put(0x20, &0u64.to_le_bytes());
+        assert!(changed(&level), "removed nearby collision must be rebuilt");
+        owner.put(0x44, &2u32.to_le_bytes());
+        assert!(level.near([10.0, 20.0], 16.0).is_err(), "a replaced owner cannot publish ids");
     }
 
     /// A BVH instance (with its archetype and bound) at `translation`, holding
@@ -790,7 +852,7 @@ mod tests {
             table.put((3 + k) * STRIDE, &(f.inst.at() | 2).to_le_bytes());
         }
         let level = Level { base: table.at() as usize, image: (0x1000, 0x7FFF_0000_0000), layout: TableLayout::Legacy };
-        let (tris, census) = level.walk([0.0, 0.0], 128.0).expect("walk");
+        let (tris, census, seen) = level.walk([0.0, 0.0], 128.0).expect("walk");
         assert_eq!(census.bvh, 10);
         assert_eq!(census.in_range, 2, "the far one and the fillers are out of reach");
         assert_eq!((census.spare, census.filtered, census.filled), (1, 0, 0), "the bullet-only copy repeats the map: nothing to fill");
@@ -800,12 +862,17 @@ mod tests {
         assert_eq!(tris[0].v, [[1.0, 2.0, 3.0], [3.0, 2.0, 3.0], [1.0, 4.0, 3.0]]);
         assert_eq!(tris[0].material, 4);
         assert!(tris[1..].iter().all(|t| t.material == 17), "the box polygon takes material 1");
-        // Streaming a bound in changes the fingerprint; nothing else does.
-        let before = level.signature([0.0, 0.0], 128.0).unwrap();
-        assert_eq!(before, level.signature([0.0, 0.0], 128.0).unwrap());
+        // Streaming a bound in near the skater counts; nothing else does,
+        // and the one far off only counts once the skater is near it.
+        assert!(!changed_near(&seen, &level.near([0.0, 0.0], 16.0).unwrap(), [0.0, 0.0], 16.0));
         let late = bvh(10, (0x3e, 0x07f3_bec0), [10.0, 10.0, 0.0], &verts);
         table.put(10 * STRIDE, &(late.inst.at() | 2).to_le_bytes());
-        assert_ne!(before, level.signature([0.0, 0.0], 128.0).unwrap());
+        assert!(changed_near(&seen, &level.near([0.0, 0.0], 16.0).unwrap(), [0.0, 0.0], 16.0));
+        assert!(!changed_near(&seen, &level.near([9000.0, 300.0], 16.0).unwrap(), [9000.0, 300.0], 16.0));
+        // Dropping a bound the build read counts too.
+        table.put(STRIDE, &0u64.to_le_bytes());
+        table.put(10 * STRIDE, &0u64.to_le_bytes());
+        assert!(changed_near(&seen, &level.near([0.0, 0.0], 16.0).unwrap(), [0.0, 0.0], 16.0));
     }
 
     #[test]
@@ -875,7 +942,7 @@ mod tests {
             table.put((3 + k) * STRIDE, &(f.inst.at() | 2).to_le_bytes());
         }
         let level = Level { base: table.at() as usize, image: (0x1000, 0x7FFF_0000_0000), layout: TableLayout::Legacy };
-        let (tris, census) = level.walk([0.0, 0.0], 128.0).expect("walk");
+        let (tris, census, _) = level.walk([0.0, 0.0], 128.0).expect("walk");
         assert_eq!(census.composites, 1, "{census}");
         assert_eq!(census.children_used, 2, "the bullet-only child is only a gap filler: {census}");
         assert_eq!((census.spare, census.filled, census.children_filtered), (1, 0, 0), "{census}");

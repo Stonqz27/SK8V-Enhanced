@@ -26,6 +26,14 @@ void Tick(bool skating);
 // GET_RADIO_STATION_NAME id for its logo). False when the HUD or the banner
 // is unavailable (the caller notifies instead).
 bool ShowRadio(const char* top, const char* middle, const char* bottom, const char* station);
+// Script thread: Skate 3's Trick Analyzer on or off (viewport flag bit 1).
+void SetTrickAnalyzer(bool on);
+// Time spent in the Present callback (render thread) since the last call.
+struct PresentStats {
+    double totalMs = 0.0, maxMs = 0.0;
+    unsigned count = 0;
+};
+PresentStats TakePresentStats();
 // DllMain detach: unregisters the callback; releases GPU objects unless the
 // process is exiting.
 void Shutdown(bool processExit);

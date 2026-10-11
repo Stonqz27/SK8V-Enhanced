@@ -250,6 +250,18 @@ void Apply(std::uintptr_t s, bool fresh = false) {
     if (compare) liveclip::EndCompare();
 }
 
+// Time spent in Apply (VerboseLog): [0] GTA's main thread, [1] its anim workers.
+std::atomic<long long> g_applyTicks[2]{};
+std::atomic<unsigned> g_applyCalls{0};
+void TimedApply(std::uintptr_t s, bool fresh, int where) {
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    Apply(s, fresh);
+    QueryPerformanceCounter(&b);
+    g_applyTicks[where].fetch_add(b.QuadPart - a.QuadPart, std::memory_order_relaxed);
+    g_applyCalls.fetch_add(1, std::memory_order_relaxed);
+}
+
 template <int Index>
 std::uintptr_t __fastcall JobWrap(std::uintptr_t params, std::uintptr_t b, std::uintptr_t c, std::uintptr_t d) {
     JobDetour& job = g_jobs[Index];
@@ -268,7 +280,7 @@ std::uintptr_t __fastcall JobWrap(std::uintptr_t params, std::uintptr_t b, std::
             }
         } else {
             const std::uintptr_t locals = *reinterpret_cast<const std::uintptr_t*>(s + 0x10);
-            if (locals && *reinterpret_cast<const std::uintptr_t*>(params + job.spec.localsOffset) == locals) Apply(s, Index == 0);
+            if (locals && *reinterpret_cast<const std::uintptr_t*>(params + job.spec.localsOffset) == locals) TimedApply(s, Index == 0, 1);
         }
     }
     return result;
@@ -353,12 +365,19 @@ bool __fastcall Slot(std::uintptr_t self, bool flag) {
             return result;
         }
         const std::uintptr_t s = g_skeleton.load(std::memory_order_relaxed);
-        if (s) Apply(s);
+        if (s) TimedApply(s, false, 0);
     }
     return result;
 }
 
 } // namespace
+
+ApplyTime TakeApplyTime() {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    const double perMs = static_cast<double>(f.QuadPart) / 1000.0;
+    return {g_applyTicks[0].exchange(0) / perMs, g_applyTicks[1].exchange(0) / perMs, g_applyCalls.exchange(0)};
+}
 
 void SetGun(bool on, int ms) {
     const int dir = on ? 1 : -1;

@@ -107,6 +107,10 @@ pub fn placement(layout: &Layout) -> Placement {
 pub(crate) struct Bindings {
     pub(crate) movie: Movie,
     pub(crate) data: HomData,
+    /// The Trick Analyzer's gesture (`TrickAnalyzer_GetTrickData`).
+    pub(crate) gesture: String,
+    /// Its diagram mirrored (the rider stands goofy).
+    pub(crate) mirrored: bool,
 }
 
 fn array(vm: &mut Vm, values: impl IntoIterator<Item = Value>) -> Result<Value, String> {
@@ -205,7 +209,8 @@ impl Host for Bindings {
             // Enumeration flags only; the movie never enumerates prototypes.
             ("global", "ASSetPropFlags") => Ok(Value::Undefined),
             // Frontend sounds and screen registration have no GTA counterpart.
-            ("Audio", "PlaySound" | "ChyronIntroDone" | "ChyronOutroDone") | ("ScreenManager", "OnLoaded") => {
+            ("Audio", "PlaySound" | "ChyronIntroDone" | "ChyronOutroDone")
+            | ("ScreenManager", "OnLoaded" | "RegisterScreen") => {
                 Ok(Value::Undefined)
             }
             ("FELanguage", "GetLanguage") => Ok(Value::Text("english".into())),
@@ -255,6 +260,41 @@ impl Host for Bindings {
                 let skater = array(vm, skater.map(number))?;
                 array(vm, [car, dmo, tweak, ped, skater])
             }
+            // The Trick Analyzer: [gesture, challenge settings]. Its merged
+            // Gesture Item (tools/prepare-hom-hud.py) has no script: the
+            // gesture seeks the `gesture` clip's labelled frame instead of
+            // attachMovie, the stick label follows (left stick for reverts),
+            // and challenge settings do not apply.
+            ("HUDComponents", "TrickAnalyzer_GetTrickData") => {
+                let gesture = Value::Text(self.gesture.clone());
+                array(vm, [gesture, Value::Bool(false)])
+            }
+            (_, "SetGestureType") => {
+                let gesture = arg(0).text();
+                if let Value::Object(clip) = vm.get(object, "gesture") {
+                    let mirrored = if self.mirrored { "_mirrored" } else { "" };
+                    let label = Value::Text(format!("g_{gesture}{mirrored}"));
+                    match self.movie.method(vm, clip, "gotoAndStop", &[label]) {
+                        Err(e) if !e.contains("lacks label") => return Err(e),
+                        _ => {}
+                    }
+                }
+                if let Value::Object(stick) = vm.get(object, "mStick") {
+                    if let Value::Object(label) = vm.get(stick, "labelText") {
+                        let id = if gesture == "revert" { "ID_MAP_LEFTANALOG_ABBREVIATION" } else { "ID_CAC_RIGHTANALOG_ABBREVIATION" };
+                        vm.set(label, "text", Value::Text(id.into()))?;
+                        self.movie.text_changed(vm, label)?;
+                    }
+                }
+                Ok(Value::Undefined)
+            }
+            (_, "SetBackerVisibility") => {
+                if let Value::Object(backer) = vm.get(object, "mBacker") {
+                    vm.set(backer, "_visible", Value::Bool(arg(0).truth()))?;
+                }
+                Ok(Value::Undefined)
+            }
+            (_, "SetUseSkateChallengeSettings" | "SkateChallenegeSetGest") => Ok(Value::Undefined),
             _ => Err(format!("Unimplemented Hall of Meat HUD binding {native}.{method}")),
         }
     }

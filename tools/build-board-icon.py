@@ -12,8 +12,9 @@ for the board, editing the player's own hud.gfx at the tag level:
   ShowFrame;
 - the ammo counter and weapon icon scripts treat the board as melee (no "0"):
   both switch on WeaponsLUT constants, so the value of one Online-only melee
-  constant, WEAPON_CANDY_CANE, becomes the board's hash. That is a 4-byte change
-  in WeaponsLUT's int push; no script code moves or is recompiled.
+  constant, WEAPON_CANDY_CANE (WEAPON_STONE_HATCHET in older hud.gfx copies
+  that HUD mods ship), becomes the board's hash. That is a 4-byte change in
+  WeaponsLUT's int push; no script code moves or is recompiled.
 
 Standard library only (setup runs it). Input: hud.gfx from the user's
 update.rpf (extracted when missing). Output: local/live-clip/hud.gfx, installed
@@ -39,7 +40,9 @@ WIDTH_TWIPS = 2400          # WEAPON_BAT's icon is 2480 x 287
 TWIPS_PER_PIXEL = 5         # stock atlas icons use 20; 4x their resolution
 SPRITES = ('SLOT_WEAPONS_4', 'MASTER_WEAPONS')
 LUT = '__Packages.com.rockstargames.gtav.constants.WeaponsLUT'
-DONOR = 'WEAPON_CANDY_CANE'  # Online-only melee constant in both scripts' melee cases
+# Online-only melee constants in both scripts' melee cases, first found wins
+# (HUD mods ship hud.gfx from before the candy cane).
+DONORS = ('WEAPON_CANDY_CANE', 'WEAPON_STONE_HATCHET')
 
 DO_INIT_ACTION, EXPORT_ASSETS, DEFINE_SPRITE, END = 59, 56, 39, 0
 DEFINE_SHAPE, DEFINE_BITS_LOSSLESS2 = 2, 36
@@ -149,7 +152,7 @@ def icon_frame(shape_id, ratio, size):
 # --- the edit ----------------------------------------------------------------
 
 def lut_patch(data, tags, names):
-    """Offset of WEAPON_CANDY_CANE's int value in WeaponsLUT's push."""
+    """The donor (DONORS) and the offset of its int value in WeaponsLUT's push."""
     sid = names[LUT]
     _, _, body, ln = next(t for t in tags if t[0] == DO_INIT_ACTION and struct.unpack_from('<H', data, t[2])[0] == sid)
     p, end, pool, hits = body + 2, body + ln, [], []
@@ -162,7 +165,7 @@ def lut_patch(data, tags, names):
         rec = data[p + 3:p + 3 + n]
         if code == 0x88:  # ConstantPool
             pool = rec[2:].split(b'\0')[:struct.unpack_from('<H', rec)[0]]
-        elif code == 0x96 and pool:  # Push: register 1, constant DONOR, int value
+        elif code == 0x96 and pool:  # Push: register 1, a constant, its int value
             q, values = 0, []
             while q < n:
                 t = rec[q]
@@ -170,12 +173,14 @@ def lut_patch(data, tags, names):
                 values.append((t, rec[q + 1:q + 1 + size], p + 4 + q))
                 q += 1 + size
             for (t1, v1, _), (t2, _, at) in zip(values, values[1:]):
-                if t1 in (8, 9) and t2 == 7 and pool[int.from_bytes(v1, 'little')] == DONOR.encode():
-                    hits.append(at)
+                if t1 in (8, 9) and t2 == 7:
+                    hits.append((pool[int.from_bytes(v1, 'little')].decode(errors='replace'), at))
         p += 3 + n
-    if len(hits) != 1:
-        raise SystemExit(f'WeaponsLUT: expected one int definition of {DONOR}, found {len(hits)}')
-    return hits[0]
+    for donor in DONORS:
+        at = [a for name, a in hits if name == donor]
+        if len(at) == 1:
+            return donor, at[0]
+    raise SystemExit(f'WeaponsLUT: no single int definition of {" or ".join(DONORS)}')
 
 
 def build(data, asset):
@@ -192,7 +197,7 @@ def build(data, asset):
     bitmap_id = max(i for i in ids if i < 65534) + 1
     defs, size = icon_tags(w, h, argb_z, bitmap_id, bitmap_id + 1)
     targets = {names[n] for n in SPRITES}
-    value_at = lut_patch(data, tags, names)
+    donor, value_at = lut_patch(data, tags, names)
     out, inserted = bytearray(data[:start]), False
     for code, hp, body, ln in tags:
         raw = data[hp:body + ln]
@@ -213,7 +218,7 @@ def build(data, asset):
     if not inserted:
         raise SystemExit('target sprites not found')
     struct.pack_into('<I', out, 4, len(out))
-    return bytes(out), (w, h), size
+    return bytes(out), (w, h), size, donor
 
 
 def make_asset():
@@ -258,10 +263,10 @@ def main():
             raise SystemExit(f'{args.source} missing: pass --game-root to extract it')
         subprocess.run([RAGE, '--no-update-check', '--exe', args.game_root, 'extract', '-r',
                         args.game_root / 'update/update.rpf', '*scaleform_generic.rpf/hud.gfx', '-o', WORK], check=True)
-    data, px, size = build(args.source.read_bytes(), ASSET.read_bytes())
+    data, px, size, donor = build(args.source.read_bytes(), ASSET.read_bytes())
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(data)
-    print(f'{args.out}: INT{HASH} frame, {px[0]}x{px[1]} px, {size[0]}x{size[1]} twips; {DONOR} -> board (no ammo text)')
+    print(f'{args.out}: INT{HASH} frame, {px[0]}x{px[1]} px, {size[0]}x{size[1]} twips; {donor} -> board (no ammo text)')
 
 
 if __name__ == '__main__':

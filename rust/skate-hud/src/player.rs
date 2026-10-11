@@ -111,6 +111,16 @@ impl Assets {
         Self::load_movie(root, "chyron.json")
     }
 
+    /// `<data_root>/private/hud-analyser` (tools/prepare-hom-hud.py --movie trickanalyser).
+    pub fn analyser_dir_for(data_root: &Path) -> PathBuf {
+        data_root.join("private").join("hud-analyser")
+    }
+
+    /// The Trick Analyzer movie (`runtime/trickanalyser.json`).
+    pub fn load_analyser(root: &Path) -> Result<Self, String> {
+        Self::load_movie(root, "trickanalyser.json")
+    }
+
     /// The Hall of Meat movie (`runtime/homscoring.json`).
     pub fn load_hom(root: &Path) -> Result<Self, String> {
         Self::load_movie(root, "homscoring.json")

@@ -8,19 +8,30 @@
 
 A community **Enhanced compatibility port of [SK8V by Hoppi / becaring](https://github.com/becaring/SK8V)**. The original release targets Legacy. This repository adapts the native host, live collision reader, animation hooks, board resources, HUD presentation and audio integration for Enhanced. The original Skate simulation and gameplay remain the foundation.
 
-Maintained by **[Stonqz27](https://github.com/Stonqz27)**. Based on SK8V 1.0.9, commit [`15b9a3b`](https://github.com/becaring/SK8V/commit/15b9a3b7a4148cfd1fa233e4aac2034574cfe880). Original Git history, licenses and credits are preserved.
+Maintained by **[Stonqz27](https://github.com/Stonqz27)**. Based on [SK8V 1.1.8](https://github.com/becaring/SK8V/releases/tag/1.1.8), commit [`9fbef44`](https://github.com/becaring/SK8V/commit/9fbef449b51178521495d3f9dd90c91f98f7fe18). Original Git history, licenses and credits are preserved.
 
 ## Status
 
-**Playable on the tested Enhanced installation.** On October 10, 2026, the maintainer reported that the full skating test stayed stable. Separate live checks passed for animation jobs, native board/weapon loading, Direct3D 12 presentation and GTA audio streams. A headless test exercised the actual Skate runtime, board, poses, camera, scoring HUD and audio together.
+**1.1.8 source update; new live play test pending.** The previous 1.0.9-based Enhanced checkpoint was playable on the tested installation. On October 10, 2026, the maintainer reported that the full skating test stayed stable. Separate live checks passed for animation jobs, native board/weapon loading, Direct3D 12 presentation and GTA audio streams. A headless test exercised the actual Skate runtime, board, poses, camera, scoring HUD and audio together.
 
 This is currently a **source release for developers**. A portable Enhanced setup wizard and ready-to-install binary release still need packaging. The upstream Legacy wizard is not an Enhanced installer. See [BUILDING.md](BUILDING.md) and [docs/INSTALLATION.md](docs/INSTALLATION.md).
+
+## Upstream 1.1.8 update
+
+The merge includes all upstream commits from 1.0.9 through 1.1.8 while retaining the Enhanced host, collision layout, pose hooks, D3D12 HUD and audio adaptations:
+
+- Controller detection through GTA's XInput path, native DualShock 4/DualSense input, and the Windows uptime fix.
+- Incremental collision rebuilding, lower-priority streaming checks, cached dynamic-entity lookups and lighter control processing.
+- Gestures, posture/riding-style and board-equipment settings; Trick Analyzer source and optional owned-data preparation.
+- Wheel-spin smoothing, startup/shutdown fixes and reduced repeated crash logging.
+
+**Enhanced exceptions:** the new Legacy D3D11 snow stencil is disabled, and wheel-track rendering awaits an Enhanced Gen9 texture-loading path. Their simulation/helper code is preserved. See [update notes and validation](docs/UPSTREAM-1.1.8.md). This is a source update, not a ready-to-install binary release.
 
 ## Requirements
 
 - Windows x64 and **GTA V Enhanced 1.0.1158.16**, Story Mode.
 - Compatible [ScriptHookV](https://www.dev-c.com/gtav/scripthookv/) and ASI loader. The test used its v3889.0 / 1158.13 distribution on Enhanced 1.0.1158.16.
-- An Xbox or compatible XInput controller. Gameplay uses Skate 3's controller inputs.
+- An Xbox/XInput controller, or DualShock 4/DualSense via the new upstream HID reader. PlayStation input is not yet live-verified on Enhanced. Gameplay uses Skate 3's controller inputs.
 - Your own Skate 3 Xbox 360 ISO or extracted disc folder. Tested: title ID `454108E6`, media ID `5C087C2C`, no title update.
 - Enhanced-compatible OpenRPF for locally prepared DLC.
 - Patched ReShade 6.8.0 and `SK8VHudBridge.addon64` as described in the build guide for the scoring HUD and Hall of Meat presentation.
@@ -42,7 +53,8 @@ This is currently a **source release for developers**. A portable Enhanced setup
 
 One Skate runtime supplies simulation and presentation. GTA renders the native player and board, without a second guest-character overlay.
 
-## Controls
+## Support Me
+[<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" height="40">](https://buymeacoffee.com/becaring) [<img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" height="36">](https://ko-fi.com/becaring)
 
 | Input | Action |
 |---|---|
@@ -51,7 +63,7 @@ One Skate runtime supplies simulation and presentation. GTA renders the native p
 | Hold **Y** | Put the board away and return to GTA |
 | Keyboard **/** or **Back + LB** | Open SK8V settings |
 
-Other skating inputs are Skate 3's Flick-It controls. **O is not required.** Preparation runs in the background after the player loads; the first preparation on the tested machine took roughly 40–60 seconds.
+D-pad gestures and riding/equipment settings are available in the upstream menu. Other skating inputs are Skate 3's Flick-It controls. **O is not required.** Preparation runs in the background after the player loads; the first preparation on the tested machine took roughly 40–60 seconds.
 
 ## Known limitations
 
@@ -60,6 +72,8 @@ Other skating inputs are Skate 3's Flick-It controls. **O is not required.** Pre
 - Full NPC/car contact, death recovery and live Michael/Trevor gameplay need wider testing. Their pose layouts passed the headless test.
 - `PedPoseCollision=0` disables the unported Legacy private registrar. The Legacy weapon-wheel icon hook is not ported.
 - Some audio splice start offsets are unsupported; complete sound parity is not claimed.
+- New Legacy snow-stencil and loose texture-registration hooks are excluded on Enhanced; wheel-track visuals are pending.
+- Reprepare Trick Analyzer data for its display; keep the updated host and runtime together. See [upgrade notes](docs/UPSTREAM-1.1.8.md).
 - Upstream teleporting/Editor limitations still apply. Return to GTA control before teleporting.
 
 See [docs/VALIDATION.md](docs/VALIDATION.md). Report issues with the exact game version, GPU and reproduction steps; avoid uploading game dumps, keys or extracted assets.

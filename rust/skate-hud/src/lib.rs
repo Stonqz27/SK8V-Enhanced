@@ -42,6 +42,7 @@ pub mod apt_scene;
 #[path = "../../../upstream/skate-3-rust-engine-donor/crates/skate-game/src/hud_runtime.rs"]
 pub mod hud_runtime;
 
+pub mod analyser;
 pub mod chyron;
 pub mod hom;
 pub mod layout;
@@ -50,6 +51,7 @@ pub mod player;
 mod presentation;
 pub mod raster;
 
+pub use analyser::AnalyserPlayer;
 pub use chyron::ChyronPlayer;
 pub use hom::{HomData, HomPlayer};
 pub use layout::Layout;

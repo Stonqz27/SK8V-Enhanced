@@ -14,6 +14,12 @@ Prepare data from the player's own copies. Upstream scripts produce core Skate d
 
 Live geometry comes from the Enhanced collision reader. Missing optional caches can reduce dynamic collision/effect fidelity.
 
+## Updating from the initial Enhanced checkpoint
+
+Read [the 1.1.8 upgrade notes](UPSTREAM-1.1.8.md). Deploy the newly built Enhanced ASI and runtime together; the new host rejects an older runtime missing required exports. The maintainer's working game installation has not been replaced by this source update. Upstream's 1.1.8 Legacy ZIP is not an Enhanced update package.
+
+Trick Analyzer display needs a fresh owned-data export. The upstream 1.1.6 setup change also updates the weapon-wheel HUD asset; its OpenIV/Legacy discovery path does not establish OpenRPF/Enhanced compatibility. Preserve your existing Enhanced DLC and modded HUD until the Enhanced preparation path is validated.
+
 ## Install layout
 
 After backing up and **closing GTA**, the installation needs:
