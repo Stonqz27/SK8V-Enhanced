@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 #include <cstdint>
 #include <cstddef>
@@ -309,6 +310,12 @@ using SvSetSkitchStandoffFn = std::uint32_t(__cdecl*)(void*, float);
 // withdraws it. Returns 1 when queued.
 // Export: sv_set_physics_level.
 using SvSetPhysicsLevelFn = std::uint32_t(__cdecl*)(void*, std::uint64_t, std::uint64_t, std::uint64_t);
+// Enhanced extension, same calling convention and ABI 8 layouts:
+// sv_set_enhanced_physics_level(rt, owner, image_lo, image_hi). The first
+// address is the phLevel owner, NOT record zero. The runtime validates and
+// bounds its table and detects streaming replacement; owner 0 withdraws it.
+// Enhanced hosts require this export and must reject an unported Legacy DLL.
+using SvSetEnhancedPhysicsLevelFn = SvSetPhysicsLevelFn;
 
 // sv_skitch_vehicle(rt): GTA handle of the vehicle being skitched, 0 when none.
 // Export: sv_skitch_vehicle.

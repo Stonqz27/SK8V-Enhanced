@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 // Skate 3's original HUD over GTA: the runtime runs the APT trickdisplay movie
 // and publishes a flat draw list (ABI 8 hud block); this module fetches it on
@@ -28,4 +29,8 @@ bool ShowRadio(const char* top, const char* middle, const char* bottom, const ch
 // DllMain detach: unregisters the callback; releases GPU objects unless the
 // process is exiting.
 void Shutdown(bool processExit);
+#if defined(SK8V_ENHANCED)
+void EnhancedPresent(void* swap,void* queue);
+void EnhancedDestroySwapchain(void* swap);
+#endif
 }

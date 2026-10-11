@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 #include "ped_collider_builder.h"
 #include <cstdint>
@@ -30,6 +31,7 @@ bool PedFragmentType(int ped, std::uintptr_t& type, const char*& why);
 bool ReadLive(std::uintptr_t address, void* out, std::size_t size);
 // The entity's fragInst (its phInst), 0 on failure. Script thread.
 std::uintptr_t FragInstOf(std::uintptr_t entity);
+int FragSlotOffset();
 
 // Live memory for the collider builder.
 class LiveMemory : public pedcollision::builder::Memory {

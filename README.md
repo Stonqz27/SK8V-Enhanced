@@ -1,88 +1,78 @@
-![SK8V Gameplay](media/sk8v.webp)
+# SK8V Enhanced
 
-# SK8V
+**Skate 3 gameplay in GTA V Enhanced Story Mode.**
 
-**Skate 3 gameplay. GTA V's open world.**
+![Enhanced edition](https://img.shields.io/badge/GTA_V-Enhanced-2288cc)
+![Tested build](https://img.shields.io/badge/tested_build-1.0.1158.16-green)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
+A community **Enhanced compatibility port of [SK8V by Hoppi / becaring](https://github.com/becaring/SK8V)**. The original release targets Legacy. This repository adapts the native host, live collision reader, animation hooks, board resources, HUD presentation and audio integration for Enhanced. The original Skate simulation and gameplay remain the foundation.
 
-SK8V brings *Skate 3*'s Flick-It controls, board/skater physics, grinds, manuals, skitching, tricks, combos, bails, scoring, session markers, and Hall of Meat into **GTA V Legacy Story Mode**. Skate's gameplay runs alongside GTA's characters, traffic, weapons, radio, and world interactions. Skate 3’s own audio engine runs inside GTA’s mixer, so wheels sound different on every GTA surface. Things like concrete, asphalt, wood, metal, tile all sound different, and your wheels click over the cracks and seams in the pavement, with almost complete coverage.
+Maintained by **[Stonqz27](https://github.com/Stonqz27)**. Based on SK8V 1.0.9, commit [`15b9a3b`](https://github.com/becaring/SK8V/commit/15b9a3b7a4148cfd1fa233e4aac2034574cfe880). Original Git history, licenses and credits are preserved.
+
+## Status
+
+**Playable on the tested Enhanced installation.** On October 10, 2026, the maintainer reported that the full skating test stayed stable. Separate live checks passed for animation jobs, native board/weapon loading, Direct3D 12 presentation and GTA audio streams. A headless test exercised the actual Skate runtime, board, poses, camera, scoring HUD and audio together.
+
+This is currently a **source release for developers**. A portable Enhanced setup wizard and ready-to-install binary release still need packaging. The upstream Legacy wizard is not an Enhanced installer. See [BUILDING.md](BUILDING.md) and [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
 ## Requirements
-- **SSD is recommended for installation**
-- **Windows x64**, **GTA V Legacy 1.0.3889.0**, and **ScriptHookV v3889.0 / 1158.13** with its ASI loader. (https://www.dev-c.com/gtav/scripthookv/)
-- Your own Skate 3 Xbox 360 disc ISO or extracted disc folder (tested: title ID 454108E6, media ID 5C087C2C, no title update)
-- About **7 GB free** on your GTA drive for setup; roughly **2 GB** remains afterward.
 
-**Story Mode only.** GTA V Enhanced, GTA Online, and FiveM are not supported.
+- Windows x64 and **GTA V Enhanced 1.0.1158.16**, Story Mode.
+- Compatible [ScriptHookV](https://www.dev-c.com/gtav/scripthookv/) and ASI loader. The test used its v3889.0 / 1158.13 distribution on Enhanced 1.0.1158.16.
+- An Xbox or compatible XInput controller. Gameplay uses Skate 3's controller inputs.
+- Your own Skate 3 Xbox 360 ISO or extracted disc folder. Tested: title ID `454108E6`, media ID `5C087C2C`, no title update.
+- Enhanced-compatible OpenRPF for locally prepared DLC.
+- Patched ReShade 6.8.0 and `SK8VHudBridge.addon64` as described in the build guide for the scoring HUD and Hall of Meat presentation.
+- SSD recommended; several GB free for owned asset preparation.
 
-## Install
+**Story Mode only; disable BattlEye when using ASI mods.** Online and FiveM are unsupported. Other Enhanced patches need their own address/resource validation.
 
-1. Download and extract the latest **SK8V release ZIP** from [Releases](../../releases/latest), **not** GitHub's Source code ZIP.
-2. Close GTA V and run **`SK8V Setup.cmd`**. (If your GTA installation is in a protected folder (Program Files, etc.) setup will offer to restart as administrator.)
-3. Select your Skate 3 disc, choose **Regular** or **Goofy** stance, and press **Install**. Setup detects your GTA V folder when possible.
-4. Launch GTA V Legacy **Story Mode with BattlEye disabled**. Select the **skateboard** in GTA's weapon wheel, then press `Y` to mount it.
+## Enhanced fixes
 
-Setup prepares data from your copies of both games. It can download a local Python environment if needed, and rerunning it resumes interrupted preparation.
+| Area | Adaptation |
+|---|---|
+| Animation | Validated Enhanced worker bindings; apply Skate poses after GTA's animation jobs. |
+| Characters | Support larger skeletons; Franklin, Michael and Trevor pose layouts covered. |
+| Collision | Enhanced table capacity, record layout, tagged instances and streaming-owner checks. |
+| Board | Native seven-bone board, Gen9 drawable conversion and DLC loading. |
+| Graphics | Original HUD through D3D11-on-12 on GTA's Direct3D 12 presentation path. |
+| Audio | Enhanced native stream bindings, ring layout and lifetime handling. |
+| Compatibility | Exclude unported Legacy private streaming/collider hooks. |
 
-Command-line alternative (Python 3.11+, NumPy, Pillow):
-
-```powershell
-python tools/prepare.py --skate "<Skate 3.iso or folder>" --gta "<GTA V folder>" --stance Goofy --install --clean
-```
-
-(from the extracted release folder; omit --stance for Regular).
-
-### Unable to save settings in the menu?
-
-1. Right-click your game install folder and select Properties.
-2. Click the Security tab and click Edit.
-3. Click Add, type your specific user account name (or less preferably, Everyone), then click Check Names and OK.
-4. Select the newly added user or group, check the box for Full control under the Allow column, then click Apply and OK
-
-### Known Limitations & Future Support
-
-- **Rockstar Editor:** Recording and playback are not currently functional with SK8V. Support is planned for a future update.
-
-- **Teleporting while skating:** Teleporting directly while Skate mode is active may cause the skater to fall through the map. Switch back to GTA control before teleporting, then resume skating at your destination.
-
-- **GTA V Enhanced:** SK8V currently supports GTA V Legacy only. Enhanced Edition compatibility is a long-term goal, but may require significant additional work and is not guaranteed.
+One Skate runtime supplies simulation and presentation. GTA renders the native player and board, without a second guest-character overlay.
 
 ## Controls
 
-**All regular skating controls are Skate 3's.** SK8V adds:
-
 | Input | Action |
 |---|---|
-| GTA weapon wheel → **Skateboard** | Enter Skate mode |
-| `Y` / hold `Y` | Mount or dismount / put the board away and return to GTA |
-| Keyboard `/` or controller `Back + LB` | Open SK8V menu |
-| `Back` / hold `Back` | Equip or holster a weapon / open weapon wheel when armed |
-| `LB` / `RB` when armed | Aim / fire |
-| D-pad left/right, gun holstered | Change radio station |
-| D-pad left/right, gun equipped | Change weapon |
-| Double-tap `X` on foot near a grabbable wall | GTA mantle, then return to Skate |
+| Weapon wheel → **Skateboard**, melee slot | Select the board / enter Skate mode |
+| Controller **Y** | Mount or dismount |
+| Hold **Y** | Put the board away and return to GTA |
+| Keyboard **/** or **Back + LB** | Open SK8V settings |
 
-Swimming switches to GTA automatically and returns to Skate afterward. **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
+Other skating inputs are Skate 3's Flick-It controls. **O is not required.** Preparation runs in the background after the player loads; the first preparation on the tested machine took roughly 40–60 seconds.
 
-## Uninstall
+## Known limitations
 
-With GTA V closed, remove these from its folder:
+- Stable observed play does not establish every surface, mod combination or game patch. Long-session performance and collision edge cases need broader testing.
+- An extended test logged `Nonfinite grab query` and returned to GTA control. This simulation issue remains open; the guard restores player tasks.
+- Full NPC/car contact, death recovery and live Michael/Trevor gameplay need wider testing. Their pose layouts passed the headless test.
+- `PedPoseCollision=0` disables the unported Legacy private registrar. The Legacy weapon-wheel icon hook is not ported.
+- Some audio splice start offsets are unsupported; complete sound parity is not claimed.
+- Upstream teleporting/Editor limitations still apply. Return to GTA control before teleporting.
 
-- `SkateVLegacy.asi`, `SkateVRuntime.dll`, `SkateVLegacy.ini`, `SkateVLegacy.installed.json`
-- `SK8V/`
-- `update/x64/dlcpacks/skatev/`
+See [docs/VALIDATION.md](docs/VALIDATION.md). Report issues with the exact game version, GPU and reproduction steps; avoid uploading game dumps, keys or extracted assets.
 
-Logs and records are in `%LOCALAPPDATA%\SkateV` and can be deleted separately. ScriptHookV is left untouched.
+## Credits and license
 
-## Building from Source
+- **Hoppi / becaring** — original SK8V host, integration and gameplay.
+- **chasmlol and vladtrc** — pinned Rust engine/mashup used by SK8V.
+- **Sol4ra** — live collision reader credited by upstream; attribution preserved.
+- **Patrick Mours / crosire** — ReShade and addon API.
+- **dexyfex / CodeWalker contributors** — separately supplied Gen9 reader for asset preparation.
+- Other components retain their licenses; see [NOTICE](NOTICE).
 
-Run BOOTSTRAP.bat to build the code, then follow BUILDING.md to package a release. The baked world collision data is copied from a published release.
+SK8V and this port's project code use [Apache-2.0](LICENSE). ReShade headers and the separate audio decoder retain their own licenses.
 
-## License
-
-Original SK8V code is [Apache-2.0](LICENSE); third-party components keep their own licenses and are credited in [NOTICE](NOTICE). SK8V is an unofficial fan project, unaffiliated with EA, Rockstar Games, or Take-Two Interactive. No GTA V or Skate 3 retail assets, executables, keys, or proprietary SDK redistributables are included; supply your own game copies.
-
-## Support Me
-[<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" height="40">](https://buymeacoffee.com/becaring) [<img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" height="36">](https://ko-fi.com/becaring)
-
-If you had fun with SK8V, a donation is NEVER required but always appreciated <3 
+No retail game assets, executables, decryption keys, private memory captures, compiled SDKs or personal settings are distributed here. Supply and convert your own games. This is an unofficial community port, unaffiliated with EA, Rockstar Games or Take-Two Interactive and not an official upstream SK8V release.

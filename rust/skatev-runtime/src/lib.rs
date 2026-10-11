@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #![allow(clippy::missing_safety_doc)]
 // The library name is the shipped DLL name (SkateVRuntime.dll) the host loads.
 #![allow(non_snake_case)]
@@ -1075,7 +1076,23 @@ pub unsafe extern "C" fn sv_set_physics_level(rt: *mut c_void, table: u64, image
         let level = (table != 0 && image_hi > image_lo).then(|| live::Level {
             base: table as usize,
             image: (image_lo as usize, image_hi as usize),
+            layout: live::TableLayout::Legacy,
         });
+        rt.jobs.send(Job::PhysicsLevel(level)).is_ok() as u32
+    })
+}
+
+/// Additive Enhanced-only ABI extension. `owner` is the live phLevel, not
+/// Legacy's record-zero address. An invalid owner leaves the current request
+/// unchanged; owner=0 explicitly withdraws the table.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_set_enhanced_physics_level(rt: *mut c_void, owner: u64, image_lo: u64, image_hi: u64) -> u32 {
+    guard(0, || {
+        let Some(rt) = (unsafe { runtime(rt) }) else { return 0 };
+        let level = if owner == 0 { None } else {
+            let Ok(level) = live::Level::enhanced(owner as usize, (image_lo as usize, image_hi as usize)) else { return 0 };
+            Some(level)
+        };
         rt.jobs.send(Job::PhysicsLevel(level)).is_ok() as u32
     })
 }

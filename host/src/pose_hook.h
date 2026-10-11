@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 #include "game_probe.h"
 #include <cstdint>
@@ -9,15 +10,25 @@
 // with the bone object matrices that rendering skins from. Found with a
 // guard-page write trace and static analysis of the in-memory image; see DECISIONS.
 //
-// The player ped gets a private copy of its virtual table whose slot 65
-// calls GTA's method and then writes Skate's pose into the skeleton's object
-// (+0x18) and local (+0x10) matrices. GTA's code is not patched and no other
-// entity is affected; Uninstall puts the original table pointer back.
+// The player's private vtable follows slot 65; two validated animation worker
+// functions are also detoured, filtered by the exact player locals buffer.
+// Enhanced bindings are edition-specific (animation_hooks.h); the diagnostic
+// observation path counts calls without publishing or writing any Skate pose.
 namespace posehook {
 
 // `entity`: the player ped's address (ScriptHookV), `skeleton` its crSkeleton.
 bool Install(std::uintptr_t entity, const probe::SkeletonInfo& skeleton, void (*log)(const char*));
 void Uninstall(void (*log)(const char*));
+struct Observation {
+    std::uint64_t pedPasses=0, calls[2]{}, playerJobs[2]{}, badCounts[2]{};
+    std::uintptr_t params[2]{}, locals[2]{};
+    unsigned threads[2]{};
+    bool jobsInstalled=false, tableRestored=true;
+};
+// Script thread. The same wrappers used by gameplay, with Apply disabled.
+bool Observe(std::uintptr_t entity,const probe::SkeletonInfo& skeleton,void (*log)(const char*));
+Observation ReadObservation();
+void StopObservation(void (*log)(const char*));
 
 // Script thread. Bone world matrices (GTA space), 16 floats per bone in RAGE
 // row layout (X axis, Y axis, Z axis, translation).

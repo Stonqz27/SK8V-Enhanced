@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 // Custom streamed models registered from loose files (the native board and the
 // posed ped colliders). GTA 1.0.3889.0 image: the raw registration at
@@ -19,6 +20,11 @@ inline std::uintptr_t Base() { return reinterpret_cast<std::uintptr_t>(GetModule
 
 // The registrar and type loader carry the prologues measured on 3889.
 inline bool Guards() {
+#if defined(SK8V_ENHANCED)
+    // Dynamic loose-resource registration is not ported. The native board
+    // uses the verified Enhanced DLC instead. Block Legacy addresses here.
+    return false;
+#else
     const std::uintptr_t base = Base();
     __try {
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
@@ -34,10 +40,14 @@ inline bool Guards() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+#endif
 }
 
 // The streaming module is initialised (registrations would be lost before).
 inline bool Ready() {
+#if defined(SK8V_ENHANCED)
+    return false;
+#else
     const std::uintptr_t base = Base();
     __try {
         return *reinterpret_cast<const std::uint32_t*>(base + 0x2f5d7c0) != 0 &&
@@ -45,10 +55,23 @@ inline bool Ready() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+#endif
 }
 
-inline Register Registrar() { return reinterpret_cast<Register>(Base() + 0x169e4d4); }
-inline TypeLoad TypeLoader() { return reinterpret_cast<TypeLoad>(Base() + 0x91691c); }
+inline Register Registrar() {
+#if defined(SK8V_ENHANCED)
+    return nullptr;
+#else
+    return reinterpret_cast<Register>(Base() + 0x169e4d4);
+#endif
+}
+inline TypeLoad TypeLoader() {
+#if defined(SK8V_ENHANCED)
+    return nullptr;
+#else
+    return reinterpret_cast<TypeLoad>(Base() + 0x91691c);
+#endif
+}
 
 // The game's raw file API takes an ANSI path; "" when the conversion is lossy.
 inline std::string NarrowAnsi(const std::filesystem::path& path) {

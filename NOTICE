@@ -49,3 +49,26 @@ Rust crates
   Each crate linked into a shipped binary keeps its own license; release
   packages list them with their license texts in THIRD-PARTY-NOTICES.txt
   (tools/third-party-notices.py).
+
+Enhanced compatibility port
+  Maintained by Stonqz27, 2026.
+  Based on becaring/SK8V 1.0.9 at commit 15b9a3b7a4148cfd1fa233e4aac2034574cfe880.
+  Modified host, live collision reader, skeleton handling, native board/DLC
+  preparation, Direct3D 12 presentation and native audio integration.
+  Additional build/test/documentation changes make the public source checkout
+  independent of the maintainer's private captures and workstation paths.
+  Project modifications are provided under Apache-2.0; all upstream notices
+  and dependency license grants above are retained.
+
+ReShade (BSD-3-Clause OR MIT)
+  Copyright 2014/2021 Patrick Mours; https://github.com/crosire/reshade
+  Addon API 20 headers are retained under third_party/reshade with their
+  original notices and license text. The optional runtime uses pinned v6.8.0
+  source at 18deaa52de0c425a78b329e9cb3c497281cd00ec plus the documented
+  internal-DXGI-factory patch. This is an unofficial modified dependency.
+
+CodeWalker resource preparation
+  https://github.com/dexyfex/CodeWalker
+  The optional Enhanced helper links against a separately supplied compatible
+  CodeWalker Core/SharpDX build. No dependency assemblies, retail resources,
+  game keys or game-derived caches are redistributed here.

@@ -1,0 +1,18 @@
+<!-- Enhanced port preparation helper (2026), Stonqz27; see NOTICE. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <CodeWalkerDir Condition="'$(CodeWalkerDir)' == ''">$(MSBuildThisFileDirectory)../../third_party/codewalker</CodeWalkerDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="CodeWalker.Core"><HintPath>$(CodeWalkerDir)/CodeWalker.Core.dll</HintPath></Reference>
+    <Reference Include="SharpDX"><HintPath>$(CodeWalkerDir)/SharpDX.dll</HintPath></Reference>
+    <Reference Include="SharpDX.Mathematics"><HintPath>$(CodeWalkerDir)/SharpDX.Mathematics.dll</HintPath></Reference>
+    <None Include="$(CodeWalkerDir)/ShadersGen9Conversion.xml" Link="ShadersGen9Conversion.xml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="RequireOwnedPreparationDependency" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(CodeWalkerDir)/CodeWalker.Core.dll')" Text="Supply a compatible CodeWalker build with -p:CodeWalkerDir=path. See BUILDING.md." />
+  </Target>
+</Project>

@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 // D3D11 rasteriser for the original Skate 3 HUD draw list (render thread).
 // Independent of ScriptHookV so it can be exercised headless on WARP
@@ -50,6 +51,9 @@ void SetCompositeOverride(int mode);
 // pipeline state it touched. Returns the composite mode (0 sRGB view,
 // 1 frame copy, 2 gamma blend) or -1 when nothing was drawn.
 int Present(IDXGISwapChain* swapChain, const Frame& frame);
+// Borrowed device/texture, for Enhanced's D3D11-on-12 backbuffer. Neither is
+// retained across frames. Uses the same HUD and linear-composite pipeline.
+int RenderTexture(ID3D11Device* device, ID3D11Texture2D* backbuffer, const Frame& frame);
 // Releases every GPU object (device change, shutdown).
 void Release();
 }

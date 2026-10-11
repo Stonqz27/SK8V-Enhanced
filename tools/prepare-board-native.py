@@ -1,3 +1,4 @@
+# Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 """Build an owned native GTA skeletal board from prepare-board.py output.
 
 Requires numpy, Pillow and the locked rage CLI. No retail-derived output may
@@ -119,7 +120,13 @@ def export(board_path, lighting_path, reference, rage, out):
     lighting = json.loads(lighting_path.read_text())['materials']
     out.mkdir(parents=True, exist_ok=True)
     reference_xml = out / 'shader-reference.ydr.xml'
-    run_rage(rage, 'resource', 'dump', reference, '-o', reference_xml)
+    if reference.name.endswith('.ydr.xml'):
+        # Enhanced adapter: CodeWalker's Gen9 reader already supplied semantic
+        # shader XML from the user's owned Enhanced drawable. The pinned authoring
+        # CLI only reads Legacy binaries; no reverse binary conversion is assumed.
+        reference_xml.write_bytes(reference.read_bytes())
+    else:
+        run_rage(rage, 'resource', 'dump', reference, '-o', reference_xml)
     template_root = ET.parse(reference_xml)
     template = next(s for s in template_root.findall('./ShaderGroup/Shaders/Item')
                     if {'DiffuseSampler', 'BumpSampler', 'SpecSampler'} <=

@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #include "board_native.h"
 #include "board_native_detail.h"
 #include "game_probe.h"
@@ -53,6 +54,17 @@ void Fail(const char* why){Log(why);Remove();g_failed=true;}
 bool Start(const std::wstring& iniPath,const std::wstring& dataRoot,void (*log)(const char*)) {
     Stop(); g_log=log;g_failed=false;g_poseReported=false;
     if(!GetPrivateProfileIntW(L"SkateV",L"BoardNative",1,iniPath.c_str()))return false;
+#if defined(SK8V_ENHANCED)
+    // Enhanced resources are installed in the DLC and mounted by GTA/OpenRPF.
+    // Live resource gate 1158.16 verified this archetype and all seven bones.
+    // Never call Legacy's loose-file registrar or reject our own mounted name.
+    if(!gta::Call<bool>(gta::IS_MODEL_VALID,Model)||!gta::Call<bool>(gta::IS_MODEL_IN_CDIMAGE,Model)) {
+        Log("native board: Enhanced skatev DLC archetype unavailable");return false;
+    }
+    g_registered=true;g_type=true;g_started=true;g_begin=GetTickCount64();
+    gta::Call<void>(gta::REQUEST_MODEL,Model);
+    Log("native board: using mounted Enhanced seven-bone model");return true;
+#else
     const auto root=std::filesystem::path(dataRoot)/L"private"/L"board-native";
     const auto ydr=root/L"skatev_board.ydr",ytyp=root/L"skatev_board.ytyp";
     if(!std::filesystem::is_regular_file(ydr)||!std::filesystem::is_regular_file(ytyp)){Log("native board: private YDR/YTYP missing");return false;}
@@ -60,6 +72,7 @@ bool Start(const std::wstring& iniPath,const std::wstring& dataRoot,void (*log)(
     if(dr.empty()||ty.empty()||((g_ydrId!=~0u||g_ytypId!=~0u)&&(dr!=g_ydr||ty!=g_ytyp))){Log("native board: unsupported or changed resource path");return false;}
     if(!streaming::Guards()){Log("native board: 3889 streaming function guards differ");return false;}
     g_ydr=dr;g_ytyp=ty;g_started=true;g_begin=GetTickCount64();return true;
+#endif
 }
 bool Tick(bool skating,const SvBoardPose& pose) {
     if(!g_started||g_failed)return false;
@@ -67,6 +80,7 @@ bool Tick(bool skating,const SvBoardPose& pose) {
     if(pose.size!=sizeof(SvBoardPose)||pose.bone_count!=7)return Hide();
     for(const auto& bone:pose.world)for(float f:bone)if(!std::isfinite(f))return Hide();
     M entity;std::memcpy(&entity,pose.entity,sizeof(entity));posemath::Q quaternion;if(!posemath::RigidQuaternion(entity,quaternion))return Hide();
+#if !defined(SK8V_ENHANCED)
     if(!g_type) {
         g_begin=GetTickCount64();
         if(!streaming::Ready())return false;
@@ -80,6 +94,7 @@ bool Tick(bool skating,const SvBoardPose& pose) {
         }
         streaming::TypeLoader()("skatev_board.ytyp");g_type=true;Log("native board: custom YDR/YTYP registered; archetype requested");
     }
+#endif
     if(!gta::Call<bool>(gta::IS_MODEL_VALID,Model)||!gta::Call<bool>(gta::IS_MODEL_IN_CDIMAGE,Model)||!gta::Call<bool>(gta::HAS_MODEL_LOADED,Model)) {
         if(gta::Call<bool>(gta::IS_MODEL_VALID,Model))gta::Call<void>(gta::REQUEST_MODEL,Model);
         if(GetTickCount64()-g_begin>15000)Fail("native board: model load timed out");return false;
@@ -95,7 +110,9 @@ bool Tick(bool skating,const SvBoardPose& pose) {
         gta::Call<void>(gta::SET_ENTITY_COLLISION,g_object,false,false);
         // Despite the modern name, this Legacy native uses collision-enable
         // polarity, matching the measured ped collisionDisabled=1 gate.
+#if !defined(SK8V_ENHANCED)
         gta::Call<void>(gta::SET_ENTITY_COMPLETELY_DISABLE_COLLISION,g_object,false,false);
+#endif
         Log("native board: presentation object created; physics and collision disabled");
     }
     if(!gta::Call<bool>(gta::DOES_ENTITY_EXIST,g_object)){g_object=0;return false;}

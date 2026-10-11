@@ -1,9 +1,13 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #include "game_probe.h"
 #include "host_util.h"
 #include "gun_pose.h"
 #include "live_clip.h"
 #include "pose_hook.h"
 #include "pose_math.h"
+#include "animation_hooks.h"
+#include "prologue_detour.h"
+#include "thread_patch.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -17,7 +21,13 @@ namespace posehook {
 namespace {
 
 constexpr int kSlot = 65;                       // vtable offset 0x208
-constexpr std::uintptr_t kSlotRva = 0x7B0270;   // CPed per-frame animation/IK pass
+#if defined(SK8V_ENHANCED)
+constexpr std::uintptr_t kSlotRva = animationhooks::EnhancedPedPass;
+constexpr auto kJobs = animationhooks::EnhancedJobs;
+#else
+constexpr std::uintptr_t kSlotRva = animationhooks::LegacyPedPass;
+constexpr auto kJobs = animationhooks::LegacyJobs;
+#endif
 constexpr int kCopiedSlots = 512;
 constexpr int kMaxBones = 512;
 
@@ -34,23 +44,45 @@ using SlotFn = bool(__fastcall*)(std::uintptr_t, bool);
 // near the image; after GTA's task returns, Skate's pose is written for the
 // player's skeleton only, on that worker, before the chain completes.
 struct JobDetour {
-    std::uintptr_t rva;
-    int localsOffset;               // params offset of the locals pointer
+    animationhooks::Job spec;
     std::uintptr_t target = 0;
     std::uint64_t original = 0;     // first 8 bytes
-    std::uintptr_t trampoline = 0;  // original prologue (5 bytes) + jump back
+    std::uint64_t patched = 0;
+    std::uintptr_t trampoline = 0;  // complete original instructions + jump back
 };
 using JobFn = std::uintptr_t(__fastcall*)(std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
-JobDetour g_jobs[2] = {{0x15B9948, 0x20}, {0x15B8680, 0x18}};
-// mov rax, rsp; push rbp; push rbx; push rsi; push rdi; push r12..r15
-constexpr std::uint8_t kJobPrologue[15] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x41,
-                                           0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57};
+JobDetour g_jobs[2] = {{kJobs[0]}, {kJobs[1]}};
 
-std::uintptr_t g_entity = 0;
+std::atomic<std::uintptr_t> g_entity{0};
 std::uintptr_t g_originalTable = 0;
 std::uintptr_t* g_copy = nullptr; // [0] RTTI, [1..] slots
 SlotFn g_original = nullptr;
 std::atomic<std::uintptr_t> g_skeleton{0};
+std::atomic<bool> g_observing{false};
+std::atomic<std::uint64_t> g_passes{0}, g_jobCalls[2]{}, g_playerJobs[2]{}, g_badCounts[2]{};
+std::atomic<std::uintptr_t> g_jobLocals[2]{}, g_jobParams[2]{};
+std::atomic<unsigned> g_jobThreads[2]{};
+std::atomic<bool> g_tableRestored{true};
+
+// No ReadProcessMemory syscall or I/O on the animation worker. SEH bounds
+// stale job/skeleton pointers, and only the tracked player's exact buffer
+// is counted. Observation mode never calls Apply or changes a bone matrix.
+bool JobBinding(std::uintptr_t s, std::uintptr_t params, const animationhooks::Job& spec,
+                std::uintptr_t& locals, int& count, int& expectedCount) {
+    __try {
+        locals=*reinterpret_cast<const std::uintptr_t*>(params+spec.localsOffset);
+        count=*reinterpret_cast<const int*>(params+spec.countOffset);
+        expectedCount=*reinterpret_cast<const int*>(s+0x20);
+        return locals && locals==*reinterpret_cast<const std::uintptr_t*>(s+0x10);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool RestorePedTable(std::uintptr_t entity,std::uintptr_t copy,std::uintptr_t original) {
+    __try {
+        const auto previous=InterlockedCompareExchangePointer(reinterpret_cast<void* volatile*>(entity),
+            reinterpret_cast<void*>(original),reinterpret_cast<void*>(copy));
+        return previous==reinterpret_cast<void*>(copy) || previous==reinterpret_cast<void*>(original);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
 // Triple-buffered pose: the script thread fills a buffer no reader can be
 // using and then publishes its index; a reader always copies a complete pose.
@@ -222,20 +254,24 @@ template <int Index>
 std::uintptr_t __fastcall JobWrap(std::uintptr_t params, std::uintptr_t b, std::uintptr_t c, std::uintptr_t d) {
     JobDetour& job = g_jobs[Index];
     const std::uintptr_t result = reinterpret_cast<JobFn>(job.trampoline)(params, b, c, d);
+    const bool observing=g_observing.load(std::memory_order_acquire);
+    if(observing) g_jobCalls[Index].fetch_add(1,std::memory_order_relaxed);
     const std::uintptr_t s = g_skeleton.load(std::memory_order_acquire);
     if (s && params) {
-        const std::uintptr_t locals = *reinterpret_cast<const std::uintptr_t*>(s + 0x10);
-        if (locals && *reinterpret_cast<const std::uintptr_t*>(params + job.localsOffset) == locals) Apply(s, Index == 0);
+        if(observing) {
+            std::uintptr_t locals=0; int count=0,expected=0;
+            if(JobBinding(s,params,job.spec,locals,count,expected)) {
+                g_playerJobs[Index].fetch_add(1,std::memory_order_relaxed);
+                if(count!=expected || count<1 || count>kMaxBones) ++g_badCounts[Index];
+                g_jobLocals[Index]=locals; g_jobParams[Index]=params;
+                g_jobThreads[Index]=GetCurrentThreadId();
+            }
+        } else {
+            const std::uintptr_t locals = *reinterpret_cast<const std::uintptr_t*>(s + 0x10);
+            if (locals && *reinterpret_cast<const std::uintptr_t*>(params + job.spec.localsOffset) == locals) Apply(s, Index == 0);
+        }
     }
     return result;
-}
-
-void PatchQword(std::uintptr_t at, std::uint64_t value) {
-    DWORD old = 0;
-    VirtualProtect(reinterpret_cast<void*>(at), 8, PAGE_EXECUTE_READWRITE, &old);
-    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(at), static_cast<LONG64>(value));
-    VirtualProtect(reinterpret_cast<void*>(at), 8, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(at), 8);
 }
 
 bool InstallJobs(void (*log)(const char*)) {
@@ -243,10 +279,10 @@ bool InstallJobs(void (*log)(const char*)) {
     const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     char line[256];
     for (const JobDetour& job : g_jobs) {
-        const std::uintptr_t t = base + job.rva;
-        if ((t & 7) != 0 || std::memcmp(reinterpret_cast<const void*>(t), kJobPrologue, sizeof(kJobPrologue)) != 0) {
+        const std::uintptr_t t = base + job.spec.rva;
+        if ((t & 7) != 0 || std::memcmp(reinterpret_cast<const void*>(t), job.spec.signature.data(), job.spec.signature.size()) != 0) {
             std::snprintf(line, sizeof(line), "pose hook: anim task +0x%llx prologue differs; job hooks not installed",
-                          static_cast<unsigned long long>(job.rva));
+                          static_cast<unsigned long long>(job.spec.rva));
             log(line);
             return false;
         }
@@ -258,56 +294,53 @@ bool InstallJobs(void (*log)(const char*)) {
         return false;
     }
     for (const JobDetour& job : g_jobs) {
-        const auto distance = reinterpret_cast<std::intptr_t>(mem) - static_cast<std::intptr_t>(base + job.rva + 5);
+        const auto distance = reinterpret_cast<std::intptr_t>(mem) - static_cast<std::intptr_t>(base + job.spec.rva + 5);
         if (distance < INT32_MIN + 4096 || distance > INT32_MAX - 4096) {
             log("pose hook: relay memory out of jump range; job hooks not installed");
             return false;
         }
     }
     void* const wraps[2] ={reinterpret_cast<void*>(&JobWrap<0>), reinterpret_cast<void*>(&JobWrap<1>)};
+    std::array<threadpatch::Write,2> writes{};
     for (int i = 0; i < 2; ++i) {
         JobDetour& job = g_jobs[i];
-        const std::uintptr_t t = base + job.rva;
+        const std::uintptr_t t = base + job.spec.rva;
         std::uint8_t* relay = mem + 64 * i;      // jmp [rip+0]; dq wrap
-        std::uint8_t* tramp = mem + 64 * i + 32; // 5 prologue bytes; jmp [rip+0]; dq t+5
-        relay[0] = 0xFF;
-        relay[1] = 0x25;
-        std::memset(relay + 2, 0, 4);
-        std::memcpy(relay + 6, &wraps[i], 8);
-        std::memcpy(tramp, kJobPrologue, 5); // mov rax, rsp; push rbp; push rbx
-        tramp[5] = 0xFF;
-        tramp[6] = 0x25;
-        std::memset(tramp + 7, 0, 4);
-        const std::uintptr_t back = t + 5;
-        std::memcpy(tramp + 11, &back, 8);
+        std::uint8_t* tramp = mem + 64 * i + 32;
+        prologuedetour::Bytes bytes;
+        if(!prologuedetour::Plan({reinterpret_cast<const std::uint8_t*>(t),job.spec.signature.size()},
+            job.spec.signature,job.spec.coveredBytes,t,reinterpret_cast<std::uintptr_t>(relay),
+            reinterpret_cast<std::uintptr_t>(wraps[i]),bytes)) return false;
+        std::memcpy(relay,bytes.relay.data(),bytes.relay.size());
+        std::memcpy(tramp,bytes.trampoline.data(),bytes.trampoline.size());
         job.trampoline = reinterpret_cast<std::uintptr_t>(tramp);
         job.original = *reinterpret_cast<const std::uint64_t*>(t);
+        std::memcpy(&job.patched,bytes.patch.data(),8);
+        writes[i]={t,job.original,job.patched};
     }
     FlushInstructionCache(GetCurrentProcess(), mem, 4096);
-    for (int i = 0; i < 2; ++i) {
-        JobDetour& job = g_jobs[i];
-        const std::uintptr_t t = base + job.rva;
-        std::uint8_t patch[8];
-        std::memcpy(patch, &job.original, 8);
-        const auto rel = static_cast<std::int32_t>(reinterpret_cast<std::intptr_t>(mem + 64 * i) -
-                                                   static_cast<std::intptr_t>(t + 5));
-        patch[0] = 0xE9;
-        std::memcpy(patch + 1, &rel, 4);
-        std::uint64_t value;
-        std::memcpy(&value, patch, 8);
-        job.target = t;
-        PatchQword(t, value);
+    if(!threadpatch::Apply(writes)) {
+        log("pose hook: workers busy or code changed; neither job was patched");
+        return false;
     }
-    log("pose hook: anim job tasks +0x15B9948 and +0x15B8680 detoured; Skate's pose follows them on the worker");
+    for(int i=0;i<2;++i) g_jobs[i].target=writes[i].target;
+    std::snprintf(line,sizeof line,"pose hook: animation jobs +0x%llx and +0x%llx wrapped (%s)",
+        static_cast<unsigned long long>(g_jobs[0].spec.rva),static_cast<unsigned long long>(g_jobs[1].spec.rva),
+        g_observing.load()?"observe only; no pose writes":"pose override");
+    log(line);
     return true;
 }
 
 void UninstallJobs(void (*log)(const char*)) {
     if (!g_jobs[0].target) return;
-    for (JobDetour& job : g_jobs) {
-        PatchQword(job.target, job.original);
-        job.target = 0;
+    const std::array<threadpatch::Write,2> writes{{
+        {g_jobs[0].target,g_jobs[0].patched,g_jobs[0].original},
+        {g_jobs[1].target,g_jobs[1].patched,g_jobs[1].original}}};
+    if(!threadpatch::Apply(writes)) {
+        log("pose hook: restoration postponed; retained wrappers pass through without an active skeleton");
+        return;
     }
+    for(auto& job:g_jobs) job.target=0;
     // Relays and trampolines stay allocated: a worker may still be inside one.
     log("pose hook: anim job tasks restored");
 }
@@ -315,6 +348,10 @@ void UninstallJobs(void (*log)(const char*)) {
 bool __fastcall Slot(std::uintptr_t self, bool flag) {
     const bool result = g_original(self, flag);
     if (self == g_entity) {
+        if(g_observing.load(std::memory_order_acquire)) {
+            g_passes.fetch_add(1,std::memory_order_relaxed);
+            return result;
+        }
         const std::uintptr_t s = g_skeleton.load(std::memory_order_relaxed);
         if (s) Apply(s);
     }
@@ -337,7 +374,7 @@ void SetGun(bool on, int ms) {
 bool Install(std::uintptr_t entity, const probe::SkeletonInfo& skeleton, void (*log)(const char*)) {
     char line[256];
     if (!entity || !skeleton.skeleton) return false;
-    g_skeleton = skeleton.skeleton;
+    if(g_entity && g_entity!=entity) Uninstall(log);
     {
         gunpose::Spine sp;
         const std::uintptr_t data = *reinterpret_cast<const std::uintptr_t*>(skeleton.skeleton);
@@ -349,8 +386,7 @@ bool Install(std::uintptr_t entity, const probe::SkeletonInfo& skeleton, void (*
         if (parents && sp.count && sp.bone[0] < skeleton.count) sp.base = parents[sp.bone[0]];
         g_spine = sp;
     }
-    if (g_entity == entity) return true;
-    if (g_entity) Uninstall(log);
+    if (g_entity == entity) {g_skeleton=skeleton.skeleton;return true;}
     const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     const std::uintptr_t table = *reinterpret_cast<const std::uintptr_t*>(entity);
     const std::uintptr_t slot = reinterpret_cast<const std::uintptr_t*>(table)[kSlot];
@@ -365,6 +401,11 @@ bool Install(std::uintptr_t entity, const probe::SkeletonInfo& skeleton, void (*
     if (!copy) return false;
     std::memcpy(copy, reinterpret_cast<const void*>(table - sizeof(std::uintptr_t)),
                 sizeof(std::uintptr_t) * (kCopiedSlots + 1)); // RTTI locator + slots
+#if defined(SK8V_ENHANCED)
+    // Enhanced must have both writers validated; slot 65 alone is overwritten
+    // by the later worker jobs and would recreate the earlier janky bridge.
+    if(!InstallJobs(log)) {VirtualFree(copy,0,MEM_RELEASE);return false;}
+#endif
     // A pose left from an earlier session belongs to another ped (or another
     // place): writing it moves the mesh away from the entity (a Director Mode
     // actor rendered nowhere). Until this session publishes, GTA's own pose stands.
@@ -373,10 +414,15 @@ bool Install(std::uintptr_t entity, const probe::SkeletonInfo& skeleton, void (*
     copy[1 + kSlot] = reinterpret_cast<std::uintptr_t>(&Slot);
     g_copy = copy;
     g_originalTable = table;
+    g_skeleton = skeleton.skeleton;
     g_entity = entity;
     reinterpret_cast<std::atomic<std::uintptr_t>*>(entity)->store(reinterpret_cast<std::uintptr_t>(copy + 1));
-    log("pose hook: player ped's animation pass (vtable slot 65) wrapped; Skate's pose follows it");
+    g_tableRestored=false;
+    log(g_observing.load()?"pose hook: player slot 65 wrapped for observation only; original animation preserved":
+        "pose hook: player ped's animation pass (vtable slot 65) wrapped; Skate's pose follows it");
+#if !defined(SK8V_ENHANCED)
     InstallJobs(log);
+#endif
     return true;
 }
 
@@ -387,11 +433,39 @@ void Uninstall(void (*log)(const char*)) {
     g_haveWritten = false;
     UninstallJobs(log);
     if (!g_entity) return;
-    auto* const slot0 = reinterpret_cast<std::atomic<std::uintptr_t>*>(g_entity);
-    if (slot0->load() == reinterpret_cast<std::uintptr_t>(g_copy + 1)) slot0->store(g_originalTable);
+    const auto entity=g_entity.exchange(0);
+    g_tableRestored=RestorePedTable(entity,reinterpret_cast<std::uintptr_t>(g_copy+1),g_originalTable);
+    if(!g_tableRestored.load())
+        log("pose hook: previous entity released or vtable changed; no unrelated table was overwritten");
     // The copied table stays allocated: a game thread may still be using it.
-    g_entity = 0;
-    log("pose hook: original ped virtual table restored");
+    if(g_tableRestored.load()) log("pose hook: original ped virtual table restored");
+}
+
+bool Observe(std::uintptr_t entity,const probe::SkeletonInfo& skeleton,void (*log)(const char*)) {
+    if(g_entity.load() || g_jobs[0].target) return false;
+    g_passes=0;
+    for(int i=0;i<2;++i) {
+        g_jobCalls[i]=0;g_playerJobs[i]=0;g_badCounts[i]=0;
+        g_jobLocals[i]=0;g_jobParams[i]=0;g_jobThreads[i]=0;
+    }
+    g_observing.store(true,std::memory_order_release);
+    if(!Install(entity,skeleton,log)) {g_observing=false;return false;}
+    return true;
+}
+Observation ReadObservation() {
+    Observation out;
+    out.pedPasses=g_passes.load();out.jobsInstalled=g_jobs[0].target && g_jobs[1].target;
+    out.tableRestored=g_tableRestored.load();
+    for(int i=0;i<2;++i) {
+        out.calls[i]=g_jobCalls[i].load();out.playerJobs[i]=g_playerJobs[i].load();
+        out.badCounts[i]=g_badCounts[i].load();out.params[i]=g_jobParams[i].load();
+        out.locals[i]=g_jobLocals[i].load();out.threads[i]=g_jobThreads[i].load();
+    }
+    return out;
+}
+void StopObservation(void (*log)(const char*)) {
+    Uninstall(log);
+    g_observing.store(false,std::memory_order_release);
 }
 
 // LiveClip, script thread: this pose into the clip before GTA evaluates it

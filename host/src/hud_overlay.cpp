@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 // Skate 3's original HUD over GTA (see hud_overlay.h): ScriptHookV glue.
 // Script thread: fetches the runtime's draw list and textures (ABI 8 hud
 // block), sets the viewport/safe zone, hides on pause/loading screens.
@@ -18,6 +19,9 @@
 #include <vector>
 #include "hud_renderer.h"
 #include "xray_renderer.h"
+#if defined(SK8V_ENHANCED)
+#include "hud_d3d12.h"
+#endif
 #include "natives.h"
 #include "skatev_runtime.h"
 
@@ -68,16 +72,13 @@ void Logf(const char* fmt, A... a) {
     util::Logf(g.log, fmt, a...);
 }
 
-void OnPresent(void* swapChainPtr) {
+void ReadPublication(IDXGISwapChain* sc,hudrender::Frame& frame,xrayrender::Frame& xray) {
     stall::RegisterRender();
-    if (g.stopping.load() || !swapChainPtr) return;
-    auto* sc = static_cast<IDXGISwapChain*>(swapChainPtr);
+    if (g.stopping.load() || !sc) {frame.visible=false;xray.visible=false;return;}
     DXGI_SWAP_CHAIN_DESC scd{};
     if (FAILED(sc->GetDesc(&scd))) return;
     g.backbufferWidth.store(scd.BufferDesc.Width);
     g.backbufferHeight.store(scd.BufferDesc.Height);
-    static hudrender::Frame frame; // render thread's copy of the publication
-    static xrayrender::Frame xray;
     {
         std::lock_guard<std::mutex> lock(g.mutex);
         Published& p = g.pub;
@@ -101,9 +102,17 @@ void OnPresent(void* swapChainPtr) {
             xray.camera = p.xray.camera;
         }
     }
-    xrayrender::Present(sc, xray); // under the HUD
-    hudrender::Present(sc, frame);
 }
+void OnPresent(void* raw) {
+    auto* sc=static_cast<IDXGISwapChain*>(raw);
+    static hudrender::Frame frame;static xrayrender::Frame xray;
+    ReadPublication(sc,frame,xray);
+    xrayrender::Present(sc,xray);hudrender::Present(sc,frame);
+}
+#if defined(SK8V_ENHANCED)
+hud12::Bridge g_bridge;
+void* g_swapOwner=nullptr;
+#endif
 
 // ---- script thread ---------------------------------------------------------
 float IniFloat(const std::wstring& ini, const wchar_t* key, float def) {
@@ -168,7 +177,9 @@ void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
         hudrender::SetLog(log);
         xrayrender::SetLog(log);
         hudrender::SetCompositeOverride(static_cast<int>(IniFloat(iniPath, L"HudComposite", -1.0f)));
+#if !defined(SK8V_ENHANCED)
         presentCallbackRegister(OnPresent);
+#endif
         g.registered = true;
     }
     g.enabled = true;
@@ -295,13 +306,36 @@ void Tick(bool skating) {
 void Shutdown(bool processExit) {
     g.stopping.store(true);
     if (g.registered) {
+#if !defined(SK8V_ENHANCED)
         presentCallbackUnregister(OnPresent);
+#endif
         g.registered = false;
     }
     g.enabled = false;
     if (!processExit) {
         hudrender::Release();
         xrayrender::Release();
+#if defined(SK8V_ENHANCED)
+        g_bridge.Release();
+#endif
     }
 }
+#if defined(SK8V_ENHANCED)
+void EnhancedPresent(void* raw,void* queue) {
+    if(g.stopping.load()||!raw||!queue)return;
+    auto* sc=static_cast<IDXGISwapChain*>(raw);DXGI_SWAP_CHAIN_DESC desc{};
+    if(FAILED(sc->GetDesc(&desc)))return;
+    DWORD pid=0;GetWindowThreadProcessId(desc.OutputWindow,&pid);
+    if(pid!=GetCurrentProcessId()||desc.BufferDesc.Width<640||desc.BufferDesc.Height<360)return;
+    if(g_swapOwner&&g_swapOwner!=raw)return;
+    g_swapOwner=raw;
+    static hudrender::Frame frame;static xrayrender::Frame xray;
+    ReadPublication(sc,frame,xray);
+    if(g.enabled)g_bridge.Present(sc,static_cast<ID3D12CommandQueue*>(queue),frame,xray);
+}
+void EnhancedDestroySwapchain(void* raw) {
+    if(g_swapOwner!=raw)return;
+    hudrender::Release();xrayrender::Release();g_bridge.Release();g_swapOwner=nullptr;
+}
+#endif
 } // namespace hudoverlay

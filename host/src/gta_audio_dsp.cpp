@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #include "gta_audio_dsp.h"
 
 #include <algorithm>
@@ -52,6 +53,10 @@ GtaRingBuffer* NewRing(std::uint32_t sizeBytes, std::uint32_t prefillBytes) {
     auto* r = reinterpret_cast<GtaRingBuffer*>(mem);
     r->data = mem + ((sizeof(GtaRingBuffer) + 63) & ~std::size_t{63});
     r->size = sizeBytes;
+#if defined(SK8V_ENHANCED)
+    r->segmentSize = sizeBytes;
+    r->readerCount = 1;
+#endif
     InitializeCriticalSectionAndSpinCount(&r->lock, 1000); // as the game does
     r->useLock = 1;
     r->references = 1; // ours, never released
@@ -62,6 +67,9 @@ GtaRingBuffer* NewRing(std::uint32_t sizeBytes, std::uint32_t prefillBytes) {
 }
 
 GtaRingBuffer* NewStreamRing(std::uint32_t sizeBytes, std::uint32_t targetBytes) {
+    // Enhanced's first reader is ring+0x38, Legacy's is ring+0x10.
+    // The startup gate still requires at least half the ring (Enhanced
+    // +0xA6BF22 reads reader.available / 2 against stream bytes / 4).
     // GTA 3889 +0x12EFDD2 gives the reader a view at ring+0x10.
     // Its +0x12EBE36 startup gate compares view+8 (available) against
     // half of ring.size. Below that threshold it never advances the cursor.

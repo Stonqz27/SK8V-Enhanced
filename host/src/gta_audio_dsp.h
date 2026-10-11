@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 // Pure helpers of the GTA audio bridge (gta_audio.cpp), kept free of GTA so host/tests/gta_audio_tests.cpp can exercise them:
 //  - the layout and writer of GTA's audReferencedRingBuffer,
@@ -15,6 +16,37 @@ namespace gtaaudio {
 // game's own construction (Bink, image +0x126041A), writer (PushAudio
 // +0x3EDABC) and reader (stream player +0x12E620C / +0x12E9638); see
 // evidence/2026-10-01/gta-audio-bridge.md. int16 PCM, interleaved.
+#if defined(SK8V_ENHANCED)
+// Enhanced 1158.16: the Bink constructor (+0x15908F2), producer
+// (+0xA256A0) and stream consumer (+0xA6C040) agree on this layout.
+// There are 36 reader records. This bridge owns one, with segmentOffset 0.
+struct GtaRingBuffer {
+    std::uint8_t* data;                    // +0x00
+    std::uint32_t size;                    // +0x08 total PCM bytes
+    std::uint32_t segmentSize;             // +0x0C PCM bytes per reader
+    CRITICAL_SECTION lock;                // +0x10
+    std::uint32_t readOffset;              // +0x38 first reader
+    std::uint32_t writeOffset;             // +0x3C
+    std::int32_t available;                // +0x40
+    std::uint32_t segmentOffset;           // +0x44
+    std::uint8_t otherReaders[35 * 16];    // +0x48
+    std::uint32_t readerCount;             // +0x278
+    std::uint8_t unused27C;
+    std::uint8_t useLock;                  // +0x27D
+    std::uint8_t pad27E[2];
+    volatile LONG references;             // +0x280
+    std::uint32_t unused284;
+};
+static_assert(offsetof(GtaRingBuffer, lock) == 0x10);
+static_assert(offsetof(GtaRingBuffer, readOffset) == 0x38);
+static_assert(offsetof(GtaRingBuffer, writeOffset) == 0x3C);
+static_assert(offsetof(GtaRingBuffer, available) == 0x40);
+static_assert(offsetof(GtaRingBuffer, segmentOffset) == 0x44);
+static_assert(offsetof(GtaRingBuffer, readerCount) == 0x278);
+static_assert(offsetof(GtaRingBuffer, useLock) == 0x27D);
+static_assert(offsetof(GtaRingBuffer, references) == 0x280);
+static_assert(sizeof(GtaRingBuffer) == 0x288);
+#else
 struct GtaRingBuffer {
     std::uint8_t* data;          // +0x00
     std::uint32_t size;          // +0x08 bytes
@@ -39,6 +71,8 @@ static_assert(offsetof(GtaRingBuffer, lock) == 0x20);
 static_assert(offsetof(GtaRingBuffer, useLock) == 0x49);
 static_assert(offsetof(GtaRingBuffer, references) == 0x50);
 static_assert(sizeof(GtaRingBuffer) == 0x58);
+#endif
+static_assert(sizeof(CRITICAL_SECTION) == 40);
 
 // A ring the host owns for good: VirtualAlloc'd (never the game's allocator)
 // and holding one reference of its own that is never released, so GTA's

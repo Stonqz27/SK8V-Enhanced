@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 // GTA peds as Skate sees them, with hitboxes like the player's: every part of a ped's own ragdoll compound
 // (capsules and boxes of its live fragment type, with their authored masses),
@@ -9,7 +10,24 @@
 #include <cstdint>
 #include <vector>
 
+namespace pedcollision::builder { class Memory; }
+
 namespace pedbodies {
+
+#if defined(SK8V_ENHANCED)
+constexpr int kMaxBones = 512; // Same bound as the verified Enhanced skeleton resolver.
+#else
+constexpr int kMaxBones = 256;
+#endif
+struct PoseView {
+    std::uintptr_t bones=0, parent=0, objects=0;
+    int count=0;
+};
+// The same decoder/pose composition as Collect, against checked read-only
+// memory. Allows replay of an owned live capture without calling GTA.
+bool CollectFromMemory(const pedcollision::builder::Memory& memory,std::uintptr_t fragmentType,
+                       const PoseView& pose,std::uint32_t tag,SvVec3 velocity,SvVec3 angular,
+                       std::vector<SvPedPart>& out);
 
 // Appends the posed parts of `ped` (GTA world space) tagged `tag`; false and
 // nothing appended when its compound or skeleton cannot be read.

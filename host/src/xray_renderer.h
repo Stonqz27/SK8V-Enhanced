@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 // D3D11 pass for Skate 3's Hall of Meat x-ray (render thread): the runtime's
 // broken-bone triangles (GTA world space, colours as the `defaulthom` shader
@@ -43,6 +44,8 @@ void SetLog(LogFn log);
 // Draws `frame` over the swapchain's current backbuffer, restoring all
 // pipeline state it touched. Returns true when something was drawn.
 bool Present(IDXGISwapChain* swapChain, const Frame& frame);
+// Borrowed D3D11-on-12 presentation texture; same x-ray pipeline as Legacy.
+bool RenderTexture(ID3D11Device* device, ID3D11Texture2D* backbuffer, const Frame& frame);
 // Releases every GPU object (device change, shutdown).
 void Release();
 }

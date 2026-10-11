@@ -1,0 +1,19 @@
+diff --git a/source/dxgi/dxgi.cpp b/source/dxgi/dxgi.cpp
+index c736654..5cea800 100644
+--- a/source/dxgi/dxgi.cpp
++++ b/source/dxgi/dxgi.cpp
+@@ -704,6 +704,14 @@ extern "C" HRESULT WINAPI CreateDXGIFactory2(UINT Flags, REFIID riid, void **ppF
+ 		return CreateDXGIFactory1(riid, ppFactory);
+ 	}
+ 
++	// D3D11-on-12 requests an internal factory with flag 0x80000000 and
++	// IDXGIFactory4. Upgrading that opaque request to IDXGIFactory7 raises a
++	// DXGI breakpoint exception on Windows 11. Preserve the entire internal
++	// request and native result; only public factories should be upgraded or
++	// wrapped. Reproduced by the Enhanced HUD addon without GTA involved.
++	if ((Flags & 0x80000000u) != 0)
++		return trampoline(Flags, riid, ppFactory);
++
+ 	// It is crucial that ReShade hooks this after the Steam overlay already hooked it, so that ReShade is called first and the Steam overlay is called through the trampoline below
+ 	// This is because the Steam overlay only hooks the swap chain creation functions when the vtable entries for them still point to the original functions, it will no longer do so once ReShade replaced them ("... points to another module, skipping hooks" in GameOverlayRenderer.log)
+ 

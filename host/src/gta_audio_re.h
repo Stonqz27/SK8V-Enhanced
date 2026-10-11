@@ -1,7 +1,8 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 #include <cstdint>
 
-// GTA V Legacy 1.0.3889.0 audio engine entry points used by the GTA audio
+// GTA V audio engine entry points used by the GTA audio
 // bridge (gta_audio.cpp). Every address was found by static analysis of the
 // decrypted in-memory image (local/re/audio_bridge.py re-finds and
 // cross-checks each one; evidence/2026-10-01/gta-audio-bridge.md). The game's
@@ -12,7 +13,8 @@
 // Resolve() checks each signature at its expected RVA (falling back to a
 // unique match in .text), then cross-checks the call targets inside the Bink
 // function against the resolved functions. Nothing is called unless every
-// required check passes.
+// required check passes. Enhanced 1.0.1158.16 uses its independently guarded
+// adapter (gta_audio_enhanced_re.cpp), without a Legacy signature fallback.
 namespace gtare {
 
 struct Audio {
@@ -33,7 +35,7 @@ struct Audio {
     void*(__fastcall* getCategoryPtr)(void* manager, std::uint32_t hash) = nullptr; // optional
     // Globals.
     void* frontendEntity = nullptr;            // audEntity the Bink sounds are created on
-    const std::uint8_t* initParamsBucket = nullptr; // byte copied to params +0x9A
+    const std::uint8_t* initParamsBucket = nullptr; // byte copied to kParamsBucket
     const std::uintptr_t* settingsPoolBase = nullptr;
     const std::uint32_t* settingsStride = nullptr;
     const std::uint32_t* settingsWriteIndex = nullptr;
@@ -68,12 +70,24 @@ std::uint8_t* MixerWaitTimedOutFlag(void (*log)(const char*));
 void* RequestedSettings(const Audio& a, void* sound);
 
 // Audio offsets inside GTA structures used directly (guarded by the signatures).
-constexpr int kParamsSize = 0xC0;   // audSoundInitParams is 0xA0 used bytes; padded
+constexpr int kParamsSize = 0xC0;   // padded init params (Legacy 0xA0, Enhanced 0xAB used)
+#if defined(SK8V_ENHANCED)
+constexpr int kParamsPan = 0x3E;
+constexpr int kParamsTracker = 0x50;
+constexpr int kParamsCategory = 0x60; // Optional category lookup is gated separately.
+constexpr int kParamsEnvGroup = 0x68;
+constexpr int kParamsBucket = 0xA6;
+constexpr std::uintptr_t kSettingsBucketStride = 0x83D0;
+constexpr std::uintptr_t kSettingsBlockOffset = 0x83C0;
+#else
 constexpr int kParamsPan = 0x3A;    // s16, -1 = positional; Bink sets 0 for screen movies
 constexpr int kParamsTracker = 0x48;
 constexpr int kParamsCategory = 0x58;
 constexpr int kParamsEnvGroup = 0x60;
 constexpr int kParamsBucket = 0x9A;
+constexpr std::uintptr_t kSettingsBucketStride = 0x34D0;
+constexpr std::uintptr_t kSettingsBlockOffset = 0x34C0;
+#endif
 constexpr int kEntityTypeOffset = 0x28; // CEntity type byte; 4 = ped
 constexpr int kEntityAudioId = 0x08;    // audEntity id (u16), 0xFFFF = not registered
 // naEnvironmentGroup interior fields (SetInteriorSettings, image +0x4A8164):

@@ -1,4 +1,5 @@
-//! Adapted for Legacy from Sol4ra's LS-Skate-LiveCollision (GTA V Enhanced),
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
+//! Adapted for Legacy and Enhanced from Sol4ra's LS-Skate-LiveCollision (GTA V Enhanced),
 //! shared with SK8V by its author.
 //!
 //! The static map read live from GTA's physics level: the table of every
@@ -18,6 +19,8 @@
 //! name, `host/src/physics_level.cpp`) and hands the runtime its address
 //! (`sv_set_physics_level`); every read here goes through `ReadProcessMemory`,
 //! so a stale or half-written structure fails a read instead of faulting.
+//! Enhanced uses the additive `sv_set_enhanced_physics_level` export, passing
+//! the owner header: capacity at +0x44, table at +0x50, instance at record +0x20.
 //!
 //! What counts as static map: BVH bounds (type 8), plus the composites and
 //! authored primitives GTA keeps in its fixed state (state bits 2) with map
@@ -98,11 +101,20 @@ fn vec3_at(b: &[u8], o: usize) -> Vec3 {
 
 /// Where GTA's physics level is, as the host reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableLayout {
+    Legacy,
+    /// Enhanced 1158.16: tagged instance at record +0x20, exact capacity
+    /// from the owning level. Revalidate its header around every table pass.
+    Enhanced { owner: usize, capacity: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Level {
     /// Address of record 0 of the table.
     pub base: usize,
     /// GTA's main image (a phInst's vtable points into it).
     pub image: (usize, usize),
+    pub layout: TableLayout,
 }
 
 /// What one pass found (logged beside the build).
@@ -185,21 +197,53 @@ impl Bvh {
 }
 
 impl Level {
+    pub fn enhanced(owner: usize, image: (usize, usize)) -> Result<Self, String> {
+        let mut header = [0u8; 0x60];
+        if !read_mem(owner, &mut header) { return Err("Enhanced physics level header unreadable".into()); }
+        let capacity = u32_at(&header, 0x44) as usize;
+        let base = u64_at(&header, 0x50);
+        if !(1..=8192).contains(&capacity) || !heap(base) || image.1 <= image.0 {
+            return Err("Enhanced physics level header invalid".into());
+        }
+        Ok(Self { base: base as usize, image, layout: TableLayout::Enhanced { owner, capacity } })
+    }
+
+    fn validate_owner(&self) -> Result<(), String> {
+        if let TableLayout::Enhanced { owner, capacity } = self.layout {
+            let mut header = [0u8; 0x60];
+            if !read_mem(owner, &mut header) || u32_at(&header, 0x44) as usize != capacity ||
+                u64_at(&header, 0x50) as usize != self.base {
+                return Err("Enhanced physics table changed during snapshot".into());
+            }
+        }
+        Ok(())
+    }
+
     fn slots(&self, mut each: impl FnMut(usize, usize, u8)) -> Result<(), String> {
+        self.validate_owner()?;
+        let (slots, offset) = match self.layout {
+            TableLayout::Legacy => (SLOTS, 0),
+            TableLayout::Enhanced { capacity, .. } => (capacity, 0x20),
+        };
         let mut chunk = vec![0u8; CHUNK * STRIDE];
         let mut empties = 0usize;
-        for first in (0..SLOTS).step_by(CHUNK) {
+        for first in (0..slots).step_by(CHUNK) {
+            let count = CHUNK.min(slots - first);
             // A chunk that runs past the end of the allocation is read in
             // pieces so the slots before the end still count.
             let mut valid = 0;
-            if read_mem(self.base + first * STRIDE, &mut chunk) {
-                valid = CHUNK;
+            if read_mem(self.base + first * STRIDE, &mut chunk[..count * STRIDE]) {
+                valid = count;
             } else {
-                for s in (0..CHUNK).step_by(64) {
-                    if !read_mem(self.base + (first + s) * STRIDE, &mut chunk[s * STRIDE..(s + 64) * STRIDE]) {
+                if matches!(self.layout, TableLayout::Enhanced { .. }) {
+                    return Err("Enhanced physics table became unreadable".into());
+                }
+                for s in (0..count).step_by(64) {
+                    let end = (s + 64).min(count);
+                    if !read_mem(self.base + (first + s) * STRIDE, &mut chunk[s * STRIDE..end * STRIDE]) {
                         break;
                     }
-                    valid = s + 64;
+                    valid = end;
                 }
             }
             if valid == 0 {
@@ -209,22 +253,23 @@ impl Level {
                 return Ok(());
             }
             for j in 0..valid {
-                let inst = (u64_at(&chunk, j * STRIDE) & MASK) as usize;
+                let tagged = u64_at(&chunk, j * STRIDE + offset);
+                let inst = (tagged & MASK) as usize;
                 if inst == 0 {
                     empties += 1;
-                    if empties > 4096 {
+                    if empties > 4096 && matches!(self.layout, TableLayout::Legacy) {
                         return Ok(());
                     }
                     continue;
                 }
                 empties = 0;
-                each(first + j, inst, (u64_at(&chunk, j * STRIDE) & 0xF) as u8);
+                each(first + j, inst, (tagged & 0xF) as u8);
             }
             if valid < CHUNK {
                 break;
             }
         }
-        Ok(())
+        self.validate_owner()
     }
 
     /// The BVH instances within `half` (+ margin) of `centre` that the skater
@@ -429,12 +474,16 @@ impl Level {
             }
         }
         census.failed += extra_census.failed;
-        if census.slots < 8 {
+        // Legacy discovers candidate tables by scanning: its minimum census
+        // rejects false positives. Enhanced has a versioned owner header and
+        // exact capacity, so a valid sparse/streaming level is not a false table.
+        if census.slots < 8 && matches!(self.layout, TableLayout::Legacy) {
             return Err(format!("physics level table at {:#x} holds only {} instances", self.base, census.slots));
         }
         census.repeats = svwc::clean::drop_repeats(&mut tris);
         census.over_ground = svwc::clean::drop_over_ground(&mut tris);
         census.filled = svwc::clean::fill_gaps(&mut tris, extra);
+        self.validate_owner()?; // also cover streaming while geometry was decoded
         Ok((tris, census))
     }
 }
@@ -589,6 +638,86 @@ mod tests {
         }
     }
 
+    fn enhanced_owner(table: &Mem, capacity: u32) -> Mem {
+        let mut owner = Mem::new(0x60);
+        owner.put(0x44, &capacity.to_le_bytes());
+        owner.put(0x50, &table.at().to_le_bytes());
+        owner
+    }
+
+    #[test]
+    fn enhanced_snapshot_uses_owned_slots_ignores_legacy_prefix_and_capacity_tail() {
+        let mut table = Mem::new(4 * STRIDE);
+        let instances: Vec<_> = (0..4).map(|_| Mem::new(0x60)).collect();
+        // Non-instance data lives in +0 on Enhanced; +0x20 is the instance.
+        table.put(0, &(instances[3].at() | 1).to_le_bytes());
+        for (slot, state) in [(0, 2u64), (2, 1), (3, 2)] {
+            table.put(slot * STRIDE + 0x20, &(instances[slot].at() | state).to_le_bytes());
+        }
+        let owner = enhanced_owner(&table, 3);
+        let level = Level::enhanced(owner.at() as usize, (0x1000, 0x3000)).unwrap();
+        let mut seen = Vec::new();
+        level.slots(|slot, inst, state| seen.push((slot, inst, state))).unwrap();
+        assert_eq!(seen, vec![(0, instances[0].at() as usize, 2), (2, instances[2].at() as usize, 1)]);
+    }
+
+    #[test]
+    fn enhanced_sparse_level_keeps_collision_after_a_large_empty_run() {
+        let mut table = Mem::new(8192 * STRIDE);
+        let inst = Mem::new(0x60);
+        table.put(8000 * STRIDE + 0x20, &(inst.at() | 2).to_le_bytes());
+        let owner = enhanced_owner(&table, 8192);
+        let level = Level::enhanced(owner.at() as usize, (0x1000, 0x3000)).unwrap();
+        let mut seen = Vec::new();
+        level.slots(|slot, _, _| seen.push(slot)).unwrap();
+        assert_eq!(seen, [8000]);
+    }
+
+    #[test]
+    fn enhanced_streaming_replacement_is_rejected_before_publication() {
+        let mut table = Mem::new(3 * STRIDE);
+        let inst = Mem::new(0x60);
+        table.put(0x20, &(inst.at() | 2).to_le_bytes());
+        let mut owner = enhanced_owner(&table, 3);
+        let level = Level::enhanced(owner.at() as usize, (0x1000, 0x3000)).unwrap();
+        let result = level.slots(|_, _, _| owner.put(0x44, &2u32.to_le_bytes()));
+        assert!(result.unwrap_err().contains("changed during snapshot"));
+        assert!(level.slots(|_, _, _| panic!("stale table must not be visited")).is_err());
+    }
+
+    #[test]
+    fn enhanced_rejects_unreadable_and_unbounded_headers() {
+        assert!(Level::enhanced(0, (0x1000, 0x3000)).is_err());
+        let table = Mem::new(STRIDE);
+        for capacity in [0, 8193, u32::MAX] {
+            let owner = enhanced_owner(&table, capacity);
+            assert!(Level::enhanced(owner.at() as usize, (0x1000, 0x3000)).is_err());
+        }
+        let mut owner = enhanced_owner(&table, 1);
+        assert!(Level::enhanced(owner.at() as usize, (0x3000, 0x1000)).is_err());
+        owner.put(0x50, &0u64.to_le_bytes());
+        assert!(Level::enhanced(owner.at() as usize, (0x1000, 0x3000)).is_err());
+    }
+
+    #[test]
+    fn enhanced_live_geometry_preserves_placement_materials_and_ped_collision_flags() {
+        let verts = [[0i16, 0, 0], [4, 0, 0], [0, 4, 0], [4, 4, 2]];
+        let map = bvh(0, (0x3e, 0x07f3_bec0), [10.0, 20.0, 30.0], &verts);
+        let bullet = bvh(1, (0x2, 0x0061_0000), [10.0, 20.0, 30.0], &verts);
+        let mut table = Mem::new(2 * STRIDE);
+        for (i, piece) in [&map, &bullet].iter().enumerate() {
+            table.put(i * STRIDE + 0x20, &(piece.inst.at() | 2).to_le_bytes());
+        }
+        let owner = enhanced_owner(&table, 2);
+        let level = Level::enhanced(owner.at() as usize, (0x1000, 0x7FFF_0000_0000)).unwrap();
+        let (triangles, census) = level.walk([10.0, 20.0], 128.0).unwrap();
+        assert_eq!((census.slots, census.bvh, census.in_range), (2, 2, 2));
+        assert_eq!(census.spare, 1);
+        assert!(triangles.iter().any(|t| t.material == 4));
+        assert!(triangles.iter().any(|t| t.material == 17));
+        assert!(triangles.iter().flat_map(|t| t.v).all(|p| p[2] >= 30.0));
+    }
+
     /// A BVH instance (with its archetype and bound) at `translation`, holding
     /// one triangle (material 4) and one box polygon (material 17).
     struct Piece {
@@ -660,7 +789,7 @@ mod tests {
         for (k, f) in filler.iter().enumerate() {
             table.put((3 + k) * STRIDE, &(f.inst.at() | 2).to_le_bytes());
         }
-        let level = Level { base: table.at() as usize, image: (0x1000, 0x7FFF_0000_0000) };
+        let level = Level { base: table.at() as usize, image: (0x1000, 0x7FFF_0000_0000), layout: TableLayout::Legacy };
         let (tris, census) = level.walk([0.0, 0.0], 128.0).expect("walk");
         assert_eq!(census.bvh, 10);
         assert_eq!(census.in_range, 2, "the far one and the fillers are out of reach");
@@ -745,7 +874,7 @@ mod tests {
         for (k, f) in filler.iter().enumerate() {
             table.put((3 + k) * STRIDE, &(f.inst.at() | 2).to_le_bytes());
         }
-        let level = Level { base: table.at() as usize, image: (0x1000, 0x7FFF_0000_0000) };
+        let level = Level { base: table.at() as usize, image: (0x1000, 0x7FFF_0000_0000), layout: TableLayout::Legacy };
         let (tris, census) = level.walk([0.0, 0.0], 128.0).expect("walk");
         assert_eq!(census.composites, 1, "{census}");
         assert_eq!(census.children_used, 2, "the bullet-only child is only a gap filler: {census}");

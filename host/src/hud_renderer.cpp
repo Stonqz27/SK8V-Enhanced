@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 // D3D11 rasteriser for Skate 3's original HUD draw list (see hud_renderer.h).
 //
 // Pipeline (same maths as the donor's scoring_hud + hud_render.wgsl +
@@ -457,15 +458,23 @@ int Present(IDXGISwapChain* sc, const Frame& frame) {
     if (gpu.failed || !sc || !frame.visible || frame.draws.empty() || !frame.textures) return -1;
     ID3D11Device* device = nullptr;
     if (FAILED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) return -1;
+    ID3D11Texture2D* backbuffer = nullptr;
+    if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&backbuffer)))) {
+        device->Release();return -1;
+    }
+    const int mode=RenderTexture(device,backbuffer,frame);
+    backbuffer->Release();device->Release();return mode;
+}
+
+int RenderTexture(ID3D11Device* device, ID3D11Texture2D* backbuffer, const Frame& frame) {
+    if(gpu.failed||!device||!backbuffer||!frame.visible||frame.draws.empty()||!frame.textures)return -1;
     if (device != gpu.device) {
         if (gpu.device) Logf("SkateV HUD: new D3D11 device; recreating the renderer");
         ReleaseAll();
         if (!CreateDeviceObjects(device)) {
-            device->Release();
             return -1;
         }
     }
-    device->Release(); // gpu.device holds its own reference
     if (gpu.device->GetDeviceRemovedReason() != S_OK) {
         Logf("SkateV HUD: device removed; renderer released");
         ReleaseAll();
@@ -476,12 +485,9 @@ int Present(IDXGISwapChain* sc, const Frame& frame) {
         return -1;
     }
 
-    ID3D11Texture2D* backbuffer = nullptr;
-    if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&backbuffer)))) return -1;
     D3D11_TEXTURE2D_DESC bd{};
     backbuffer->GetDesc(&bd);
     if (!EnsureTarget(bd.Width, bd.Height)) {
-        backbuffer->Release();
         return -1;
     }
     // Backbuffer view: sRGB if the swapchain allows it (mode 0), else native.
@@ -503,7 +509,6 @@ int Present(IDXGISwapChain* sc, const Frame& frame) {
     if (!rtv) {
         rv.Format = eightBit ? unorm : bd.Format;
         if (FAILED(gpu.device->CreateRenderTargetView(backbuffer, &rv, &rtv))) {
-            backbuffer->Release();
             return -1;
         }
         mode = (eightBit && !ms && g_compositeOverride != 2 && EnsureCopy(bd.Width, bd.Height, typeless, srgb)) ? 1 : 2;
@@ -531,7 +536,6 @@ int Present(IDXGISwapChain* sc, const Frame& frame) {
     Composite(rtv, bd.Width, bd.Height, mode);
     saved.Restore(gpu.ctx);
     rtv->Release();
-    backbuffer->Release(); // nothing is held across frames: ResizeBuffers stays legal
     return mode;
 }
 } // namespace hudrender

@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #include "audio_entity_hook.h"
 #include "gta_audio.h"
 
@@ -854,7 +855,11 @@ void Start(const std::wstring& iniPath, HMODULE runtimeModule, void* runtime, vo
     g_path = Path::Gta;
     g_mainThread = GetCurrentThreadId();
     g_lastScriptMs = GetTickCount64();
+#if !defined(SK8V_ENHANCED)
     audiohook::Install(g_re.frontendEntity, kHookFirst, kHookLast, OnEntityCall, log);
+#else
+    Log("Enhanced audio: Legacy frontend vtable observer excluded");
+#endif
     const float factor = std::pow(10.0f, g_set.gainDb / 20.0f);
     Logf("gta audio: AudioGtaGainDb %+.1f dB (x%.2f on the PCM fed to GTA)", g_set.gainDb, factor);
     for (Slot& s : g_slots) s.pcmGain.store(factor);

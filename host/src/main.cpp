@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 // SkateVLegacy.asi: GTA V Legacy Story Mode host for the adopted Skate runtime.
 // GTA side only: input acquisition, control suppression, camera, presentation
 // and HUD drawing. Skating, tricks and scoring are all Skate's.
@@ -34,6 +35,9 @@
 #include "ped_speech.h"
 #include "runtime_bridge.h"
 #include "version_guard.h"
+#if defined(SK8V_ENHANCED_PORT_PROBE)
+#include "enhanced_probe.h"
+#endif
 
 namespace {
 using gta::Call;
@@ -41,6 +45,15 @@ using gta::Call;
 RuntimeBridge g_runtime;
 std::atomic<bool> g_toggleRequested{false}; // menu: Skate on/off
 FILE* g_log = nullptr;
+#if defined(SK8V_ENHANCED)
+constexpr const wchar_t* kHostLogStem = L"SkateVEnhanced";
+constexpr const char* kHostEdition = "SK8V Enhanced";
+constexpr const char* kHostExecutable = "GTA5_Enhanced.exe";
+#else
+constexpr const wchar_t* kHostLogStem = L"SkateVLegacy";
+constexpr const char* kHostEdition = "SkateV Legacy";
+constexpr const char* kHostExecutable = "GTA5.exe";
+#endif
 std::wstring g_gameDir;
 std::wstring g_logDir; // %LOCALAPPDATA%\SkateV: the game folder is usually not writable
 
@@ -132,6 +145,9 @@ struct Config {
 };
 
 std::wstring LogDir() {
+#if defined(SK8V_ENHANCED_PORT_PROBE)
+    return L"port-evidence\\live\\";
+#endif
     wchar_t buf[MAX_PATH]{};
     const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) return g_gameDir;
@@ -151,7 +167,7 @@ std::wstring GameDir() {
 void Log(const char* message) {
     OutputDebugStringA(message);
     OutputDebugStringA("\n");
-    if (!g_log) g_log = _wfsopen((g_logDir + L"SkateVLegacy.log").c_str(), L"a", _SH_DENYNO);
+    if (!g_log) g_log = _wfsopen((g_logDir + kHostLogStem + L".log").c_str(), L"a", _SH_DENYNO);
     if (g_log) {
         SYSTEMTIME t{};
         GetLocalTime(&t);
@@ -2267,7 +2283,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
 }
 
 void ScriptMain() {
-    Log("SkateV Legacy: ScriptMain start");
+    Logf("%s: ScriptMain start", kHostEdition);
     {
         // Other script mods loaded alongside, for attributing hitches.
         std::string asis;
@@ -2279,17 +2295,23 @@ void ScriptMain() {
             } while (FindNextFileW(h, &fd));
             FindClose(h);
         }
-        Logf("SkateV Legacy: ASI files in game folder: %s", asis.c_str());
+        Logf("%s: ASI files in game folder: %s", kHostEdition, asis.c_str());
     }
     const GameVersion version = ReadHostVersion();
-    Logf("SkateV Legacy: host GTA5.exe %u.%u.%u.%u (required %u.%u.%u.%u)", version.major, version.minor,
+    Logf("%s: host %s %u.%u.%u.%u (required %u.%u.%u.%u)", kHostEdition, kHostExecutable, version.major, version.minor,
          version.build, version.revision, kRequiredVersion.major, kRequiredVersion.minor, kRequiredVersion.build,
          kRequiredVersion.revision);
-    if (!IsSupportedLegacy(version)) {
+    if (!IsSupportedHost(version)) {
         // Unsupported build: stay inert rather than call natives with wrong assumptions.
-        Log("SkateV Legacy: unsupported game version; skate mode disabled");
+        Logf("%s: unsupported game version; skate mode disabled", kHostEdition);
         for (;;) WAIT(1000);
     }
+
+#if defined(SK8V_ENHANCED_PORT_PROBE)
+    Log("SK8V Enhanced: compatibility probe only; Legacy hooks and skate activation are not entered");
+    enhancedprobe::Run(Log);
+    for (;;) WAIT(1000);
+#endif
 
     g_config = LoadConfig();
     const Config& cfg = g_config;
@@ -2435,14 +2457,21 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         g_gameDir = GameDir();
         g_logDir = LogDir();
         // One session per log: the previous launch's logs become *.prev.log, older ones go.
-        for (const wchar_t* name : {L"SkateVLegacy", L"SkateVRuntime", L"SkateVRuntime-crash"})
+        for (const wchar_t* name : {kHostLogStem, L"SkateVRuntime", L"SkateVRuntime-crash"})
             MoveFileExW((g_logDir + name + L".log").c_str(), (g_logDir + name + L".prev.log").c_str(),
                         MOVEFILE_REPLACE_EXISTING);
         DisableThreadLibraryCalls(module);
-        packloader::Install(g_gameDir, Log);
+#if defined(SK8V_ENHANCED_PORT_PROBE)
+        if (IsSupportedHost(ReadHostVersion())) enhancedprobe::Attach();
+#else
+        if (IsSupportedHost(ReadHostVersion())) packloader::Install(g_gameDir, Log);
+#endif
         keyboardHandlerRegister(Keyboard);
         scriptRegister(module, ScriptMain);
     } else if (reason == DLL_PROCESS_DETACH) {
+#if defined(SK8V_ENHANCED_PORT_PROBE)
+        enhancedprobe::Detach();
+#endif
         keyboardHandlerUnregister(Keyboard);
         scriptUnregister(module);
         hudoverlay::Shutdown(reserved != nullptr);

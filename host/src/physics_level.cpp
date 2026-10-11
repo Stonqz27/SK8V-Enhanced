@@ -1,8 +1,10 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 // Adapted for Legacy from Sol4ra's LS-Skate-LiveCollision (GTA V Enhanced),
 // shared with SK8V by its author (see physics_level.h).
 #include "physics_level.h"
 
 #include "game_probe.h"
+#include "game_build.h"
 
 #include <windows.h>
 #include <psapi.h>
@@ -209,6 +211,27 @@ void Start(void (*log)(const char*), void (*onTable)(std::uintptr_t, std::uintpt
 
 void Tick() {
     if (!g_log) return;
+#if defined(SK8V_ENHANCED)
+    if (GetTickCount() < g_nextTry) return;
+    g_nextTry = GetTickCount() + 500;
+    using Layout = gamebuild::EnhancedPhysics;
+    std::uintptr_t owner = 0, table = 0;
+    std::uint32_t capacity = 0;
+    const bool valid = Rd(g_imgLo + Layout::levelRva, owner) && HeapPtr(owner) &&
+        Rd(owner + Layout::tableOffset, table) && HeapPtr(table) &&
+        Rd(owner + Layout::capacityOffset, capacity) && capacity > 0 && capacity <= Layout::maxCapacity;
+    static std::uintptr_t previousOwner = 0, previousTable = 0;
+    static std::uint32_t previousCapacity = 0;
+    if (!valid) { Report(0); previousOwner = previousTable = 0; previousCapacity = 0; return; }
+    if (owner != previousOwner || table != previousTable || capacity != previousCapacity || !g_reported.load()) {
+        previousOwner = owner; previousTable = table; previousCapacity = capacity;
+        g_reported = 0; // capacity can change while the level pointer stays the same
+        Report(owner); // Enhanced export consumes phLevel and reads its bounded descriptor.
+        Logf("Enhanced physics level: owner %llx table %llx capacity %u; record +0x20; no heap scan",
+             static_cast<unsigned long long>(owner), static_cast<unsigned long long>(table), capacity);
+    }
+    return;
+#endif
     if (g_running || GetTickCount() < g_nextTry) return;
     std::vector<std::uint64_t> insts;
     int h[1024];

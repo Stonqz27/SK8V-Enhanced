@@ -1,3 +1,4 @@
+# Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 # Materialises the pinned mashup `skate/` workspace into build/overlay/skate and
 # applies project-owned patches from patches/skate/*.patch in name order.
 # upstream/ stays immutable; the runtime crate depends on the overlay path.
@@ -13,7 +14,10 @@ $Patches = @(Get-ChildItem (Join-Path $Root 'patches/skate') -Filter '*.patch' -
 $Stamp = Join-Path $Dest '.skatev-overlay'
 
 $hasher = [Security.Cryptography.SHA256]::Create()
-$material = (& git -C (Join-Path $Root 'upstream/2010-rust-rewrite-mashup') rev-parse HEAD).Trim()
+$mashup = Join-Path $Root 'upstream/2010-rust-rewrite-mashup'
+$headOutput = & git -c "safe.directory=$mashup" -C $mashup rev-parse HEAD
+if ($LASTEXITCODE -ne 0 -or $null -eq $headOutput) { throw 'Cannot read verified mashup commit' }
+$material = ($headOutput -join "`n").Trim()
 foreach ($p in $Patches) { $material += "`n" + $p.Name + ':' + (Get-FileHash $p.FullName -Algorithm SHA256).Hash }
 $key = -join ($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($material)) | ForEach-Object { $_.ToString('x2') })
 

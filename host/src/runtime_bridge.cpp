@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #include "runtime_bridge.h"
 #include <type_traits>
 
@@ -50,6 +51,11 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     sym(setSkitchStandoff_, "sv_set_skitch_standoff");
     sym(skitchVehicle_, "sv_skitch_vehicle");
     sym(setPhysicsLevel_, "sv_set_physics_level");
+#if defined(SK8V_ENHANCED)
+    // The official Legacy DLL lacks this bounded Enhanced table interface.
+    // Do not silently use its record-zero reader in an Enhanced process.
+    sym(setPhysicsLevel_, "sv_set_enhanced_physics_level");
+#endif
     sym(playLine_, "sv_play_line");
     if (!missing.empty()) {
         error = "SkateVRuntime.dll is missing required ABI exports: " + missing;

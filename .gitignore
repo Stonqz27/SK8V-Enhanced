@@ -49,3 +49,19 @@ Thumbs.db
 
 # Python bytecode
 __pycache__/
+
+# Enhanced port: private fixtures and downloaded/built dependencies
+/port-evidence/
+/third_party/reshade-source-*/
+/third_party/codewalker/
+**/bin/
+**/obj/
+*.exe
+*.dll
+*.asi
+*.addon64
+*.zip
+*.7z
+*.rar
+*.bin
+!tools/board-wheel-icon.bin

@@ -1,9 +1,12 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #include "game_probe.h"
 
 #include <windows.h>
 #include <main.h>
 #include <cstdint>
+#include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstring>
 
 namespace probe {
@@ -20,8 +23,15 @@ int FragSlot() {
         auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
         const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
         std::uint8_t* const end = base + nt->OptionalHeader.SizeOfImage;
+#if defined(SK8V_ENHANCED)
+        // SHVDotNet Enhanced's Enhanced-specific GetFragInst call site.
+        // Primary reference saved in port-evidence/shvdne-NativeMemory.cs.
+        static const std::uint8_t kSite[] = {0x77, 0, 0x48, 0x8B, 0x03, 0x48, 0x89, 0xD9, 0xFF, 0x50, 0, 0x48, 0x85, 0xC0};
+        int found = -2;
+#else
         static const std::uint8_t kSite[] = {0x0F, 0x84, 0x8F, 0x00, 0x00, 0x00, 0x8A, 0x48, 0x28, 0x80, 0xE9, 0x02, 0x80, 0xF9, 0x03,
                                              0x0F, 0x87, 0x80, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x10, 0x48, 0x8B, 0xC8, 0xFF, 0x52};
+#endif
         for (std::uint8_t* p = base; p < end;) {
             MEMORY_BASIC_INFORMATION mbi{};
             if (!VirtualQuery(p, &mbi, sizeof(mbi))) break;
@@ -31,17 +41,36 @@ int FragSlot() {
             const bool exec = (prot & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) &&
                               !(prot & (PAGE_GUARD | PAGE_NOACCESS));
             if (mbi.State == MEM_COMMIT && exec) {
-                for (std::uint8_t* q = region; q + sizeof(kSite) <= regionEnd && q + sizeof(kSite) <= end; ++q)
+                for (std::uint8_t* q = std::max(region, base); q + sizeof(kSite) <= regionEnd && q + sizeof(kSite) <= end; ++q)
+#if defined(SK8V_ENHANCED)
+                {
+                    bool match = true;
+                    for (std::size_t i = 0; i < sizeof(kSite); ++i)
+                        if (i != 1 && i != 10 && q[i] != kSite[i]) { match = false; break; }
+                    if (!match) continue;
+                    const int candidate = static_cast<std::int8_t>(q[10]);
+                    if (candidate < 8 || candidate > 120 || (candidate & 7) ||
+                        (found >= 0 && found != candidate)) return -2;
+                    found = candidate;
+                }
+#else
                     if (!std::memcmp(q, kSite, sizeof(kSite))) return static_cast<int>(static_cast<std::int8_t>(q[0x1D]));
+#endif
             }
             p = regionEnd;
         }
+#if defined(SK8V_ENHANCED)
+        return found;
+#else
         return -2;
+#endif
     }();
     return slot;
 }
 
 } // namespace
+
+int FragSlotOffset() { return FragSlot(); }
 
 bool ReadLive(std::uintptr_t address, void* out, std::size_t size) {
     SIZE_T got = 0;
@@ -53,8 +82,14 @@ std::uintptr_t FragInstOf(std::uintptr_t entity) {
     const int slot = FragSlot();
     std::uintptr_t vtable = 0, fn = 0;
     if (slot < 0 || !entity || !Read(entity, vtable) || !Read(vtable + slot, fn) || !fn) return 0;
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(reinterpret_cast<void*>(fn), &info, sizeof info) || info.State != MEM_COMMIT ||
+        (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+        !(info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return 0;
     using GetFragInst = std::uint8_t*(__fastcall*)(std::uint8_t*);
-    return reinterpret_cast<std::uintptr_t>(reinterpret_cast<GetFragInst>(fn)(reinterpret_cast<std::uint8_t*>(entity)));
+    __try {
+        return reinterpret_cast<std::uintptr_t>(reinterpret_cast<GetFragInst>(fn)(reinterpret_cast<std::uint8_t*>(entity)));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
 // Route 1: fragInst -> cache entry +0x68 -> +0x178. Route 2 (ScriptHookVDotNet's
@@ -89,7 +124,7 @@ bool ResolvePedSkeleton(int ped, SkeletonInfo& out, const char*& why) {
     Read(out.skeleton + 0x18, out.globalMtx);
     Read(out.skeleton + 0x20, out.count);
     if (data) Read(data + 0x20, out.bones); // crBoneData[0], 80 bytes each
-    return data && out.objectMtx && out.bones && out.count > 0;
+    return data && out.parentMtx && out.objectMtx && out.globalMtx && out.bones && out.count > 0 && out.count <= 512;
 }
 
 bool SkeletonJson(const SkeletonInfo& s, std::string& json) {
@@ -117,6 +152,11 @@ bool SkeletonJson(const SkeletonInfo& s, std::string& json) {
         std::memcpy(&parent, bone + 0x32, 2);
         std::memcpy(&namePtr, bone + 0x38, 8);
         std::memcpy(&tag, bone + 0x44, 2);
+        // Malformed bindings must never become invalid JSON or animation input.
+        if (parent < -1 || parent >= s.count) return false;
+        for (float v : r) if (!std::isfinite(v)) return false;
+        for (float v : t) if (!std::isfinite(v)) return false;
+        for (float v : sc) if (!std::isfinite(v)) return false;
         char name[64] = {};
         if (namePtr) ReadLive(namePtr, name, sizeof(name) - 1);
         std::string clean;

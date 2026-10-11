@@ -1,9 +1,12 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #include "ped_bodies.h"
 
 #include "game_probe.h"
 #include <windows.h>
+#if !defined(SK8V_PED_BODIES_READONLY_TEST)
 #include <main.h>
 #include "natives.h"
+#endif
 #include "ped_collider_builder.h"
 
 #include <cmath>
@@ -40,11 +43,8 @@ std::map<std::uintptr_t, Compound> g_types;
 // (fragment type, live skeleton bones) -> bone index per shape.
 std::map<std::pair<std::uintptr_t, std::uintptr_t>, std::vector<int>> g_bones;
 
-const Compound& Load(std::uintptr_t type) {
-    auto it = g_types.find(type);
-    if (it != g_types.end()) return it->second;
+Compound Decode(const pedcollision::builder::Memory& memory,std::uintptr_t type) {
     Compound c;
-    probe::LiveMemory memory;
     std::vector<pedcollision::builder::Child> children;
     std::string why;
     std::uintptr_t group = 0, lod = 0, fragments = 0;
@@ -82,9 +82,17 @@ const Compound& Load(std::uintptr_t type) {
             c.shapes.push_back(s);
         }
     }
-    if (g_types.size() > 256) g_types.clear(), g_bones.clear();
-    return g_types[type] = std::move(c);
+    return c;
 }
+#if !defined(SK8V_PED_BODIES_READONLY_TEST)
+const Compound& Load(std::uintptr_t type) {
+    auto it = g_types.find(type);
+    if (it != g_types.end()) return it->second;
+    probe::LiveMemory memory;
+    if (g_types.size() > 256) g_types.clear(), g_bones.clear();
+    return g_types[type] = Decode(memory,type);
+}
+#endif
 
 // Row-vector 4x4: out = a * b.
 void Multiply(const double* a, const double* b, double* out) {
@@ -96,9 +104,9 @@ void Multiply(const double* a, const double* b, double* out) {
         }
 }
 
-bool ReadMatrix(std::uintptr_t at, double* m) {
+bool ReadMatrix(const pedcollision::builder::Memory& memory,std::uintptr_t at, double* m) {
     float f[16];
-    if (!probe::ReadLive(at, f, sizeof(f))) return false;
+    if (!memory.Read(at, f, sizeof(f))) return false;
     for (int i = 0; i < 16; ++i) m[i] = f[i];
     // RAGE packs metadata in column 3 of transform arrays.
     m[3] = m[7] = m[11] = 0.0;
@@ -108,37 +116,37 @@ bool ReadMatrix(std::uintptr_t at, double* m) {
     return true;
 }
 
-} // namespace
-
-bool Collect(int ped, std::uint32_t tag, std::vector<SvPedPart>& out) {
-    std::uintptr_t type = 0;
-    const char* why = "";
-    if (!probe::PedFragmentType(ped, type, why)) return false;
-    const Compound& compound = Load(type);
-    if (!compound.ok || compound.shapes.empty()) return false;
-    probe::SkeletonInfo skeleton;
-    if (!probe::ResolvePedSkeleton(ped, skeleton, why) || !skeleton.globalMtx || !skeleton.parentMtx ||
-        skeleton.count <= 0 || skeleton.count > 256)
-        return false;
-    auto& bones = g_bones[{type, skeleton.bones}];
-    if (bones.size() != compound.shapes.size()) {
-        bones.clear();
-        for (const auto& s : compound.shapes) bones.push_back(probe::BoneIndexByTag(skeleton, s.boneTag));
+bool Valid(const PoseView& pose) {
+    return pose.bones && pose.parent && pose.objects && pose.count>0 && pose.count<=kMaxBones;
+}
+std::vector<int> BoneIndices(const pedcollision::builder::Memory& memory,const Compound& compound,const PoseView& pose) {
+    std::vector<int> indices;
+    for(const auto& s:compound.shapes) {
+        int index=-1;
+        for(int b=0;b<pose.count && index<0;++b) {
+            std::uint16_t tag=0;
+            if(!memory.Read(pose.bones+80ull*b+0x44,&tag,sizeof(tag)))return {};
+            if(tag==s.boneTag)index=b;
+        }
+        indices.push_back(index);
     }
+    return indices;
+}
+bool Append(const pedcollision::builder::Memory& memory,const Compound& compound,const PoseView& pose,
+            const std::vector<int>& bones,std::uint32_t tag,SvVec3 velocity,SvVec3 angular,std::vector<SvPedPart>& out) {
+    if(!compound.ok || compound.shapes.empty() || bones.size()!=compound.shapes.size() || !Valid(pose))return false;
     // The skeleton's object matrices are relative to its parent (entity) matrix.
     static thread_local std::vector<float> objects;
-    objects.resize(static_cast<std::size_t>(skeleton.count) * 16);
+    objects.resize(static_cast<std::size_t>(pose.count) * 16);
     double parent[16];
-    if (!ReadMatrix(skeleton.parentMtx, parent) ||
-        !probe::ReadLive(skeleton.globalMtx, objects.data(), objects.size() * sizeof(float)))
+    if (!ReadMatrix(memory,pose.parent, parent) ||
+        !memory.Read(pose.objects, objects.data(), objects.size() * sizeof(float)))
         return false;
-    const Vector3 v = gta::Call<Vector3>(gta::GET_ENTITY_VELOCITY, ped);
-    const Vector3 w = gta::Call<Vector3>(gta::GET_ENTITY_ROTATION_VELOCITY, ped);
     const std::size_t start = out.size();
     for (std::size_t i = 0; i < compound.shapes.size(); ++i) {
         const Shape& s = compound.shapes[i];
         const int bone = bones[i];
-        if (bone < 0 || bone >= skeleton.count) {
+        if (bone < 0 || bone >= pose.count) {
             out.resize(start);
             return false;
         }
@@ -171,12 +179,37 @@ bool Collect(int ped, std::uint32_t tag, std::vector<SvPedPart>& out) {
         p.half_extents = {s.half[0], s.half[1], s.half[2]};
         p.radius = s.radius;
         p.mass_kg = s.mass;
-        p.linear_velocity = {v.x, v.y, v.z};
-        p.angular_velocity = {w.x, w.y, w.z};
+        p.linear_velocity = velocity;
+        p.angular_velocity = angular;
         out.push_back(p);
     }
     return true;
 }
+} // namespace
+
+bool CollectFromMemory(const pedcollision::builder::Memory& memory,std::uintptr_t type,const PoseView& pose,
+                       std::uint32_t tag,SvVec3 velocity,SvVec3 angular,std::vector<SvPedPart>& out) {
+    if(!Valid(pose))return false;
+    const auto compound=Decode(memory,type);
+    if(!compound.ok)return false;
+    return Append(memory,compound,pose,BoneIndices(memory,compound,pose),tag,velocity,angular,out);
+}
+#if !defined(SK8V_PED_BODIES_READONLY_TEST)
+bool Collect(int ped, std::uint32_t tag, std::vector<SvPedPart>& out) {
+    std::uintptr_t type=0;const char* why="";
+    if(!probe::PedFragmentType(ped,type,why))return false;
+    probe::SkeletonInfo skeleton;
+    if(!probe::ResolvePedSkeleton(ped,skeleton,why))return false;
+    const PoseView pose{skeleton.bones,skeleton.parentMtx,skeleton.globalMtx,skeleton.count};
+    if(!Valid(pose))return false;
+    const auto& compound=Load(type);probe::LiveMemory memory;
+    auto& indices=g_bones[{type,pose.bones}];
+    if(indices.size()!=compound.shapes.size())indices=BoneIndices(memory,compound,pose);
+    const auto v=gta::Call<Vector3>(gta::GET_ENTITY_VELOCITY,ped);
+    const auto w=gta::Call<Vector3>(gta::GET_ENTITY_ROTATION_VELOCITY,ped);
+    return Append(memory,compound,pose,indices,tag,{v.x,v.y,v.z},{w.x,w.y,w.z},out);
+}
+#endif
 
 int NearestComponent(const std::vector<SvPedPart>& parts, std::uint32_t tag, SvVec3 point) {
     int best = -1;

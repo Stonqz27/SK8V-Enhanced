@@ -1,4 +1,5 @@
+# Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 [toolchain]
-channel = "1.98.1"
+channel = "1.99.0"
 profile = "minimal"
 components = ["rustfmt", "clippy"]

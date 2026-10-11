@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #pragma once
 // Loads the SkateV pack, update\x64\dlcpacks\skatev\dlc.rpf, on a clean GTA
 // install: no OpenIV, no archive edits. GTA 1.0.3889.0 image:
@@ -23,6 +24,7 @@
 #include <string>
 
 namespace packloader {
+#if !defined(SK8V_ENHANCED)
 namespace detail {
 
 constexpr std::uintptr_t kMount = 0x916734, kFinish = 0x929e70, kEntries = 0x1374f50, kNames = 0x136f784;
@@ -188,9 +190,15 @@ inline DWORD WINAPI Retry(LPVOID) {
 }
 
 } // namespace detail
+#endif
 
 // From DllMain. `gameDir` ends with a backslash.
 inline void Install(const std::wstring& gameDir, util::LogFn log) {
+#if defined(SK8V_ENHANCED)
+    // Installed DLC + existing OpenRPF: verified by the bounded resource probe.
+    // Do not enter 3889's archive decryption/mount/registrar hooks in Enhanced.
+    util::Logf(log, "pack loader: Enhanced uses the installed skatev DLC; no private pack hooks");
+#else
     using namespace detail;
     g_log = log;
     g_base = Base();
@@ -202,6 +210,7 @@ inline void Install(const std::wstring& gameDir, util::LogFn log) {
     } else if (HANDLE t = CreateThread(nullptr, 0, Retry, nullptr, 0, nullptr)) {
         CloseHandle(t);
     }
+#endif
 }
 
 } // namespace packloader

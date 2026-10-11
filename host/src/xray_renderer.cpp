@@ -1,3 +1,4 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 // D3D11 pass for Skate 3's Hall of Meat x-ray (see xray_renderer.h).
 //
 // The vertices already carry the retail shader's colour (computed by the
@@ -247,14 +248,22 @@ bool Present(IDXGISwapChain* sc, const Frame& frame) {
     if (gpu.failed || !sc || !frame.visible || frame.vertices.size() < 3) return false;
     ID3D11Device* device = nullptr;
     if (FAILED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) return false;
+    ID3D11Texture2D* backbuffer = nullptr;
+    if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&backbuffer)))) {
+        device->Release();return false;
+    }
+    const bool drawn=RenderTexture(device,backbuffer,frame);
+    backbuffer->Release();device->Release();return drawn;
+}
+
+bool RenderTexture(ID3D11Device* device, ID3D11Texture2D* backbuffer, const Frame& frame) {
+    if(gpu.failed||!device||!backbuffer||!frame.visible||frame.vertices.size()<3)return false;
     if (device != gpu.device) {
         ReleaseAll();
         if (!CreateDeviceObjects(device)) {
-            device->Release();
             return false;
         }
     }
-    device->Release(); // gpu.device holds its own reference
     if (gpu.device->GetDeviceRemovedReason() != S_OK) {
         ReleaseAll();
         return false;
@@ -262,8 +271,6 @@ bool Present(IDXGISwapChain* sc, const Frame& frame) {
     const UINT count = static_cast<UINT>(frame.vertices.size() / 3 * 3);
     if (!EnsureVertexBuffer(count)) return false;
 
-    ID3D11Texture2D* backbuffer = nullptr;
-    if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&backbuffer)))) return false;
     D3D11_TEXTURE2D_DESC bd{};
     backbuffer->GetDesc(&bd);
     DXGI_FORMAT viewFormat{};
@@ -277,7 +284,6 @@ bool Present(IDXGISwapChain* sc, const Frame& frame) {
     if (FAILED(gpu.device->CreateRenderTargetView(backbuffer, &rv, &rtv)) ||
         !EnsureDepth(bd.Width, bd.Height, bd.SampleDesc.Count)) {
         SafeRelease(rtv);
-        backbuffer->Release();
         return false;
     }
     if (bd.Format != gpu.loggedFormat) {
@@ -324,7 +330,6 @@ bool Present(IDXGISwapChain* sc, const Frame& frame) {
     }
     saved.Restore(c);
     rtv->Release();
-    backbuffer->Release();
     return drawn;
 }
 } // namespace xrayrender

@@ -1,3 +1,4 @@
+# Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 $Lock = Get-Content (Join-Path $Root 'upstreams.lock.json') -Raw | ConvertFrom-Json
@@ -11,8 +12,10 @@ foreach ($repo in $Lock.repositories) {
         else { Write-Host "SKIP $dirName (reference not fetched)" }
         continue
     }
-    $head = (& git -C $dest rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or $head -ne $repo.commit) {
+    $headOutput = & git -c "safe.directory=$dest" -C $dest rev-parse HEAD
+    $gitExit = $LASTEXITCODE
+    $head = if ($null -eq $headOutput) { "" } else { ($headOutput -join "`n").Trim() }
+    if ($gitExit -ne 0 -or $head -ne $repo.commit) {
         Write-Error "BAD $dirName expected=$($repo.commit) actual=$head"
         $failed = $true
     } else {

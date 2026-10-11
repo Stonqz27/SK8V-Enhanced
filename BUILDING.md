@@ -1,47 +1,61 @@
-# Building SK8V
+# Building SK8V Enhanced
 
-Windows x64 only. The result is the same release folder and zip the published
-SK8V download contains.
+Target: GTA V Enhanced **1.0.1158.16**. Base: SK8V **1.0.9 / 15b9a3b**. Building source does not install or alter GTA.
 
-## Requirements
+## Toolchain
 
-- Git
-- Rust via rustup (the pinned 1.98.1 toolchain installs itself from `rust-toolchain.toml`)
-- Visual Studio 2022 with "Desktop development with C++" (MSVC)
-- CMake 3.24 or newer
-- Python 3.11 or newer
+- Windows x64, Git, Python 3.11+; .NET 9 for the optional asset helper.
+- Rust/rustup; this port pins the tested **1.99.0** toolchain.
+- Visual Studio C++ x64 tools, Windows SDK, CMake 3.24+ and Ninja. Scripts discover Visual Studio with `vswhere`.
+- NumPy and Pillow for asset conversion; preparation scripts document further per-step dependencies.
+- ScriptHookV SDK fetched from its publisher by the script below; never committed.
 
-## Steps
+## Host and runtime
 
-1. Clone this repository.
-2. Run `BOOTSTRAP.bat`. It:
-   - fetches the pinned upstream sources into `upstream/` (`upstreams.lock.json`): the Skate 3 Rust engine, the RAGE format and archive crates, and rage-cli;
-   - fetches the ScriptHookV SDK into `third_party/` (`external.lock.json`);
-   - builds the Rust runtime and tools, the ASI and `rage.exe` (later rebuilds: `BUILD.bat`).
-3. Copy the `world` folder from a published SK8V release zip into `world/`.
-   These are the baked collision sidecars (`los-santos.svsd`, `crackmaps.svgj`),
-   too large for git.
-4. Run `python tools\build-release.py --version <version>`.
-   The release is written to `build\release\SK8V-<version>\` and its `.zip`.
+From the repository root:
 
-The release build writes `.cargo\config.toml`, a local, git-ignored file. It
-maps your checkout and user folder out of the paths that rustc writes into
-binaries. After the first release build, run `BUILD.bat` again: the release
-build refuses binaries that still contain those paths.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/fetch-upstreams.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/fetch-scripthookv.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-rust.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-enhanced-host.ps1 -ProbeMode Gameplay
+```
 
-## Layout
+Pinned engine sources remain in `upstream/`; 44 project patches are applied to `build/overlay/skate/`. Outputs:
 
-- `host/` is the ScriptHookV ASI (C++, `SkateVLegacy.asi`). It hooks the GTA
-  side: ped pose, audio, collision, menu and HUD.
-- `rust/` holds the runtime (`SkateVRuntime.dll`), which runs Skate's
-  simulation, along with its crates and the setup tools:
-  - `skate-xma` decodes audio;
-  - `skatev-ped-export` covers ped and clip work;
-  - `skatev-world-cache` builds the world templates.
-- `patches/skate/` holds the changes applied to the pinned Skate engine
-  (`tools/prepare-skate-overlay.ps1` builds the overlay under `build/overlay/`).
-- `tools/` holds the build scripts, the player setup (`prepare.py`,
-  `setup_engine.py`, `setup-wizard.ps1`) and the preparation steps it runs.
+- `build/enhanced-gameplay-package/SkateVEnhanced.asi`
+- `build/enhanced-gameplay-package/SK8VHudBridge.addon64`
+- `build/runtime/SkateVRuntime.dll`
 
-No GTA or Skate data is in this repository. Setup builds everything from the
-player's own copies.
+The public checkout runs six C++ checks without retail fixtures. Optional image/body audits require the developer's own ignored `port-evidence/` files; the slower runtime smoke executable needs locally converted data. See [validation](docs/VALIDATION.md).
+
+`BUILD.bat` / `tools/build-host.ps1` select Enhanced gameplay. Diagnostic modes remain explicit: Animation, Resources, Graphics or Audio. They cannot be mixed with gameplay.
+
+## Graphics dependency
+
+The tested HUD uses an **unofficial patched ReShade 6.8.0**, commit `18deaa52de0c425a78b329e9cb3c497281cd00ec`. Its small patch preserves an internal DXGI factory request during D3D11-on-12 creation; the host also handles native/proxy COM identity.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/fetch-enhanced-graphics.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-enhanced-graphics-runtime.ps1
+```
+
+The fetch script gets pinned public source/submodules and applies `tools/reshade-internal-factory.patch`. Build output is `local/graphics-runtime/ReShade64.dll`. ReShade has its own SDK/generator prerequisites; follow its pinned build guide for missing dependencies. Generated receipts stay local and ignored.
+
+It is used as `dxgi.dll` beside GTA with the addon and `tools/SkateVEnhanced.ReShade.ini`. Preserve existing ReShade/graphics mods and merge configurations deliberately.
+
+## Enhanced asset helper
+
+Supply a compatible Gen9-capable CodeWalker Core build. Put `CodeWalker.Core.dll`, `SharpDX.dll`, `SharpDX.Mathematics.dll` and `ShadersGen9Conversion.xml` in one directory:
+
+```powershell
+dotnet build tools/enhanced-assets/EnhancedAssets.csproj -c Release -p:CodeWalkerDir="C:\path\to\CodeWalker"
+```
+
+The helper reads owned Enhanced resources and writes only under the ignored `local/` tree. Commands cover skeletons, shader reference extraction, verified board conversion, clip inspection and DLC/update staging. See its [guide](tools/enhanced-assets/README.md).
+
+## Player setup
+
+Legacy `tools/prepare.py` and release-packaging scripts remain upstream reference, not a complete Enhanced setup flow. The tested installation uses freshly converted Skate assets, Enhanced skeletons/clip/board DLC, host/runtime and graphics integration. See the [installation contract](docs/INSTALLATION.md).
+
+A portable installer is separate work. Do not distribute a maintainer's converted assets, full update archive, private capture or absolute-path INI.

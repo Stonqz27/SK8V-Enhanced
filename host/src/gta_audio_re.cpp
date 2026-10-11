@@ -1,4 +1,8 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #include "gta_audio_re.h"
+#if defined(SK8V_ENHANCED)
+#include "gta_audio_enhanced_re.h"
+#endif
 #include "image_code_ranges.h"
 
 #include <windows.h>
@@ -207,6 +211,9 @@ bool Resolve(Audio& a, void (*log)(const char*)) {
 }
 
 bool ResolveImage(Audio& a, void* image, void (*log)(const char*)) {
+#if defined(SK8V_ENHANCED)
+    return ResolveEnhancedImage(a, image, log);
+#else
     char line[320];
     const Image img = GameImage(image);
     std::snprintf(line, sizeof(line), "gta audio: resolving GTA audio engine (image %p, %zu executable sections)", img.base,img.code.size());
@@ -332,9 +339,14 @@ bool ResolveImage(Audio& a, void* image, void (*log)(const char*)) {
                   a.envArgDistance, a.envArgScale);
     log(line);
     return true;
+#endif
 }
 
 std::uint8_t* MixerWaitTimedOutFlag(void (*log)(const char*)) {
+#if defined(SK8V_ENHANCED)
+    if (log) log("Enhanced audio: mixer wait flag not verified; no engine flag changed");
+    return nullptr;
+#else
     const Image img = GameImage(GetModuleHandleW(nullptr));
     std::uint8_t* site = Locate(img, kSiteMixerWait, log);
     if (!site) return nullptr;
@@ -346,6 +358,7 @@ std::uint8_t* MixerWaitTimedOutFlag(void (*log)(const char*)) {
                   static_cast<unsigned long long>(flag - img.base));
     log(line);
     return same ? flag : nullptr;
+#endif
 }
 
 void* RequestedSettings(const Audio& a, void* sound) {
@@ -356,7 +369,7 @@ void* RequestedSettings(const Audio& a, void* sound) {
     const std::uint32_t bucket = s[0x62];
     const std::uintptr_t pool = *a.settingsPoolBase;
     if (!pool) return nullptr;
-    const std::uintptr_t block = *reinterpret_cast<const std::uintptr_t*>(pool + bucket * 0x34D0 + 0x34C0);
+    const std::uintptr_t block = *reinterpret_cast<const std::uintptr_t*>(pool + bucket * kSettingsBucketStride + kSettingsBlockOffset);
     if (!block) return nullptr;
     return reinterpret_cast<void*>(block + static_cast<std::uint32_t>(slot * *a.settingsStride));
 }

@@ -1,6 +1,11 @@
+// Modified for Enhanced compatibility (2026), Stonqz27; see NOTICE.
 #include "live_clip.h"
 
+#if defined(SK8V_ENHANCED)
+#include "live_clip_layout_enhanced.h"
+#else
 #include "live_clip_layout.h"
+#endif
 #include "host_util.h"
 #include "natives.h"
 
