@@ -8,6 +8,11 @@ using System.Xml.Linq;
 try {
 var workspace = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
 var local = Path.Combine(workspace, "local");
+// A release runs the helper from its own local tools copy. The explicit root
+// keeps all generated assets and archive candidates away from the game files.
+if (args.Length >= 2 && args[0] == "--output-root") {
+    local = Path.GetFullPath(args[1]); args = args.Skip(2).ToArray();
+}
 string Destination(string path) {
     var full = Path.GetFullPath(path);
     if (!full.StartsWith(local + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
@@ -49,21 +54,25 @@ switch (args[0]) {
     case "stage-update": {
         if(args.Length!=3)throw new Exception("stage-update <Enhanced game> <local output update RPF>");
         var game=Path.GetFullPath(args[1]);var source=Path.Combine(game,@"mods\update\update.rpf");
+        if(!File.Exists(source))source=Path.Combine(game,@"update\update.rpf");
         var output=Destination(args[2]);
+        if(!Path.GetFileName(output).Equals("update.rpf",StringComparison.OrdinalIgnoreCase))
+            throw new Exception("The staged archive must retain the filename update.rpf for GTA's encrypted header");
         var originalInfo=new FileInfo(source);var length=originalInfo.Length;var modified=originalInfo.LastWriteTimeUtc;
         File.Copy(source,output);
         originalInfo.Refresh();
         if(originalInfo.Length!=length || originalInfo.LastWriteTimeUtc!=modified)throw new Exception("Source archive changed during copy");
         GTA5Keys.LoadFromPath(game,true);RpfManager.IsGen9=true;
         var archive=new RpfFile(output,"update.rpf");archive.ScanStructure(_=>{},message=>throw new Exception(message));
-        if(archive.IsNGEncrypted || archive.IsAESEncrypted)throw new Exception("Existing mod archive must already use OPEN encryption");
+        // Change encryption only on our private candidate, never on the source.
+        if(archive.IsNGEncrypted || archive.IsAESEncrypted)RpfFile.SetEncryptionType(archive,RpfEncryption.OPEN);
         var entry=archive.AllEntries.OfType<RpfFileEntry>().Single(e=>e.Path.EndsWith(@"common\data\dlclist.xml",StringComparison.OrdinalIgnoreCase));
         var oldData=archive.ExtractFile(entry);var text=System.Text.Encoding.UTF8.GetString(oldData);
         var paths=XDocument.Parse(text).Root!.Element("Paths")!;
-        if(paths.Elements().Any(e=>e.Value.Replace('\\','/').TrimEnd('/').Equals("dlcpacks:/skatev",StringComparison.OrdinalIgnoreCase)))
-            throw new Exception("A skatev DLC entry already exists; review its ownership");
+        var existing=paths.Elements().Count(e=>e.Value.Replace('\\','/').TrimEnd('/').Equals("dlcpacks:/skatev",StringComparison.OrdinalIgnoreCase));
+        if(existing>1)throw new Exception("Duplicate skatev DLC entries; repair the modded DLC list first");
         if(text.IndexOf("</Paths>",StringComparison.Ordinal)!=text.LastIndexOf("</Paths>",StringComparison.Ordinal))throw new Exception("Ambiguous DLC paths");
-        var newData=System.Text.Encoding.UTF8.GetBytes(text.Replace("</Paths>","<Item>dlcpacks:/skatev/</Item></Paths>",StringComparison.Ordinal));
+        var newData=existing==1?oldData:System.Text.Encoding.UTF8.GetBytes(text.Replace("</Paths>","<Item>dlcpacks:/skatev/</Item></Paths>",StringComparison.Ordinal));
         var beforeOffset=(long)entry.FileOffset*512;var beforeSize=((entry.GetFileSize()+511)/512)*512;
         var oldItems=paths.Elements().Select(e=>e.ToString(SaveOptions.DisableFormatting)).ToArray();
         RpfFile.CreateFile(entry.Parent,entry.Name,newData);
@@ -71,7 +80,7 @@ switch (args[0]) {
         var added=check.AllEntries.OfType<RpfFileEntry>().Single(e=>e.Path.EndsWith(@"common\data\dlclist.xml",StringComparison.OrdinalIgnoreCase));
         if(!check.ExtractFile(added).SequenceEqual(newData))throw new Exception("DLC list payload changed after writing");
         var newItems=XDocument.Parse(System.Text.Encoding.UTF8.GetString(newData)).Root!.Element("Paths")!.Elements().ToArray();
-        if(newItems.Length!=oldItems.Length+1 || !newItems.Take(oldItems.Length).Select(e=>e.ToString(SaveOptions.DisableFormatting)).SequenceEqual(oldItems))
+        if(newItems.Length!=oldItems.Length+(existing==1?0:1) || !newItems.Take(oldItems.Length).Select(e=>e.ToString(SaveOptions.DisableFormatting)).SequenceEqual(oldItems))
             throw new Exception("Existing DLC list changed");
         var afterOffset=(long)added.FileOffset*512;var afterSize=((added.GetFileSize()+511)/512)*512;
         var headerSize=(16+Math.Max(archive.EntryCount,check.EntryCount)*16L+Math.Max(archive.NamesLength,check.NamesLength)+511)/512*512;
@@ -99,7 +108,8 @@ switch (args[0]) {
         if(originalInfo.Length!=length || originalInfo.LastWriteTimeUtc!=modified)throw new Exception("Source archive changed during verification");
         Report(output+".receipt.json",new {command="stage-update",source,source_sha256=Convert.ToHexString(sourceHash.GetHashAndReset()).ToLowerInvariant(),
             output_sha256=Convert.ToHexString(outputHash.GetHashAndReset()).ToLowerInvariant(),
-            original_dlc_entries=oldItems.Length,added_dlc="dlcpacks:/skatev/",existing_dlc_entries_preserved=true,
+            original_dlc_entries=oldItems.Length,resulting_dlc_entries=newItems.Length,
+            dlc_entry_added=existing==0,added_dlc="dlcpacks:/skatev/",existing_dlc_entries_preserved=true,
             changed_bytes=changed,allowed_change_ranges=new[]{new[]{0L,headerSize},new[]{beforeOffset,beforeOffset+beforeSize},new[]{afterOffset,afterOffset+afterSize}},
             unrelated_archive_bytes_preserved=true,verification_buffer_bytes=aa.Length+bb.Length,game_modified=false});
         break;

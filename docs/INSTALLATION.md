@@ -1,6 +1,6 @@
 # Enhanced installation contract
 
-This is the tested compatibility source, without a portable Enhanced setup wizard. The original Legacy release and `tools/prepare.py --install` are not Enhanced installers.
+For the downloadable Enhanced prerelease, follow [the player setup guide](PLAYER-SETUP.md). Its `SK8V Enhanced Setup.cmd` prepares local assets and installs the compiled mod with backups. The original Legacy release and `tools/prepare.py --install` are not Enhanced installers. The manual contract below describes the port's data and compatibility requirements.
 
 Prepare data from the player's own copies. Upstream scripts produce core Skate data, character animation data, HUD, Hall of Meat, audio cache and tuning. The Enhanced helper exports Gen9 ped skeletons and converts the native seven-bone board. The generated live clip must match the host's Enhanced bone-tag layout.
 
@@ -18,7 +18,7 @@ Live geometry comes from the Enhanced collision reader. Missing optional caches 
 
 Read [the 1.1.8 upgrade notes](UPSTREAM-1.1.8.md). Deploy the newly built Enhanced ASI and runtime together; the new host rejects an older runtime missing required exports. The maintainer's working game installation has not been replaced by this source update. Upstream's 1.1.8 Legacy ZIP is not an Enhanced update package.
 
-Trick Analyzer display needs a fresh owned-data export. The upstream 1.1.6 setup change also updates the weapon-wheel HUD asset; its OpenIV/Legacy discovery path does not establish OpenRPF/Enhanced compatibility. Preserve your existing Enhanced DLC and modded HUD until the Enhanced preparation path is validated.
+Trick Analyzer display needs a fresh owned-data export; Enhanced setup includes it. The upstream 1.1.6 weapon-wheel HUD icon path remains unported. Enhanced setup generates its own Gen9 board DLC and preserves existing entries in a staged modded DLC-list copy; it does not install the Legacy HUD icon.
 
 ## Install layout
 

@@ -2,6 +2,40 @@
 
 Target: Enhanced **1.0.1158.16**, Windows x64; current upstream SK8V **1.1.8 / 9fbef44**.
 
+## Experimental binary release checks (2026-10-11)
+
+The `1.1.8-enhanced.1-preview` download includes the matching Enhanced host/
+runtime and a new preparation/installation path. It is a prerelease, not new
+evidence of live gameplay stability or a complete clean-PC installation test.
+
+- Rebuild the runtime and asset authoring CLI with personal source paths remapped.
+- Recheck all **7 C++ gates** and **183 Rust tests** (0 failures, 2 intentional skips).
+- The rebuilt runtime passes the **600-frame** coupled owned-data smoke check:
+  finite character/board/camera poses, HUD publication and audible-energy audio
+  output with no pull underruns. No GTA process is touched by this harness.
+- **8 installer regressions** exercise fresh installation/restoration, existing
+  graphics conflicts, explicit backed-up replacement, preference preservation,
+  protection of subsequently modified files, injected mid-install failure,
+  path escapes and unrelated-file restoration rejection, using temporary folders.
+- Owned-resource shader export, seven-bone board Gen9 conversion and board/weapon
+  DLC staging pass model/texture/packed-resource preservation checks.
+- Fresh-install encrypted `update.rpf` staging passes a full archive comparison
+  against an isolated copy of the installed base archive. Only permitted header/
+  DLC-list ranges change; all existing DLC entries are preserved. The source and
+  actual game installation are unchanged.
+- Retry staging uses the resulting modded archive: the existing Skate DLC entry
+  is reused, no duplicate is added, and unrelated bytes remain unchanged.
+- Verified portable Python/NumPy/Pillow downloads and a relocated, extracted ZIP
+  launcher work. The package manifest verifies every shipped file by SHA-256.
+- Allowlist packaging excludes retail formats, private caches, dependency SDK/
+  reader assemblies and personal paths; notices cover 327 resolved dependency
+  packages. The separate LGPL decoder's source accompanies its binary.
+
+Setup's full disc-to-live-game flow, controller variants, third-party graphics
+combinations and other PCs still need testing. Optional baked world/template
+caches are absent from the first download; wheel-track visuals are disabled.
+See [player setup and limitations](PLAYER-SETUP.md).
+
 ## 1.1.8 source-update checks (2026-10-11)
 
 - All 49 engine patches apply to the pinned adoption source; upstream commit pins are unchanged.

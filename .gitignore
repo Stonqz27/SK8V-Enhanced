@@ -7,6 +7,8 @@ dist/
 tools/bin/
 # machine-local cargo config (tools/build-release.py: path remaps)
 /.cargo/
+/python/
+/python.download/
 
 # Fetched sources and SDKs (tools/fetch-upstreams.ps1, tools/fetch-scripthookv.ps1)
 upstream/

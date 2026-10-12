@@ -14,7 +14,7 @@ Maintained by **[Stonqz27](https://github.com/Stonqz27)**. Based on [SK8V 1.1.8]
 
 **1.1.8 source update; new live play test pending.** The previous 1.0.9-based Enhanced checkpoint was playable on the tested installation. On October 10, 2026, the maintainer reported that the full skating test stayed stable. Separate live checks passed for animation jobs, native board/weapon loading, Direct3D 12 presentation and GTA audio streams. A headless test exercised the actual Skate runtime, board, poses, camera, scoring HUD and audio together.
 
-This is currently a **source release for developers**. A portable Enhanced setup wizard and ready-to-install binary release still need packaging. The upstream Legacy wizard is not an Enhanced installer. See [BUILDING.md](BUILDING.md) and [docs/INSTALLATION.md](docs/INSTALLATION.md).
+An **experimental installable prerelease** is available from [Releases](https://github.com/Stonqz27/SK8V-Enhanced/releases/tag/1.1.8-enhanced.1-preview). Download the named Enhanced ZIP, extract it to a permanent folder, and run **SK8V Enhanced Setup.cmd**. It prepares assets from your own Skate 3 disc and installed Enhanced game, with backups and restoration. Read [the player setup guide](docs/PLAYER-SETUP.md) for dependencies and steps. The 1.1.8 build and new first-run setup still need wider live testing. The upstream Legacy wizard is not an Enhanced installer.
 
 ## Upstream 1.1.8 update
 
@@ -25,7 +25,7 @@ The merge includes all upstream commits from 1.0.9 through 1.1.8 while retaining
 - Gestures, posture/riding-style and board-equipment settings; Trick Analyzer source and optional owned-data preparation.
 - Wheel-spin smoothing, startup/shutdown fixes and reduced repeated crash logging.
 
-**Enhanced exceptions:** the new Legacy D3D11 snow stencil is disabled, and wheel-track rendering awaits an Enhanced Gen9 texture-loading path. Their simulation/helper code is preserved. See [update notes and validation](docs/UPSTREAM-1.1.8.md). This is a source update, not a ready-to-install binary release.
+**Enhanced exceptions:** the new Legacy D3D11 snow stencil is disabled, and wheel-track rendering awaits an Enhanced Gen9 texture-loading path. Their simulation/helper code is preserved. See [update notes and validation](docs/UPSTREAM-1.1.8.md). The downloadable build is marked prerelease; the previous live checkpoint remains separate.
 
 ## Requirements
 
@@ -35,7 +35,8 @@ The merge includes all upstream commits from 1.0.9 through 1.1.8 while retaining
 - Your own Skate 3 Xbox 360 ISO or extracted disc folder. Tested: title ID `454108E6`, media ID `5C087C2C`, no title update.
 - Enhanced-compatible OpenRPF for locally prepared DLC.
 - Patched ReShade 6.8.0 and `SK8VHudBridge.addon64` as described in the build guide for the scoring HUD and Hall of Meat presentation.
-- SSD recommended; several GB free for owned asset preparation.
+- .NET 9 x64 Runtime and a separately supplied Gen9-capable CodeWalker build for first-run preparation. Setup can fetch verified portable Python/NumPy/Pillow if needed.
+- SSD recommended; roughly 15 GB free for owned asset preparation plus game-directory staging/backups. See [setup](docs/PLAYER-SETUP.md).
 
 **Story Mode only; disable BattlEye when using ASI mods.** Online and FiveM are unsupported. Other Enhanced patches need their own address/resource validation.
 
@@ -89,4 +90,4 @@ See [docs/VALIDATION.md](docs/VALIDATION.md). Report issues with the exact game 
 
 SK8V and this port's project code use [Apache-2.0](LICENSE). ReShade headers and the separate audio decoder retain their own licenses.
 
-No retail game assets, executables, decryption keys, private memory captures, compiled SDKs or personal settings are distributed here. Supply and convert your own games. This is an unofficial community port, unaffiliated with EA, Rockstar Games or Take-Two Interactive and not an official upstream SK8V release.
+No retail game assets, game executables, decryption-key files, private memory captures, compiled SDKs or personal settings are distributed here. Releases contain the compiled mod and preparation tools; supply and convert your own games. This is an unofficial community port, unaffiliated with EA, Rockstar Games or Take-Two Interactive and not an official upstream SK8V release.

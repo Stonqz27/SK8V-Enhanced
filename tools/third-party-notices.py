@@ -65,13 +65,14 @@ own license, reproduced from the crate's published sources.
 """
 
 
-def graph():
+def graph(manifest=None, extra=None):
     meta = json.loads(subprocess.run(
-        ['cargo', 'metadata', '--format-version', '1', '--filter-platform', TARGET],
+        ['cargo', 'metadata', '--format-version', '1', '--filter-platform', TARGET]
+        + (['--manifest-path', str(manifest)] if manifest else []) + (extra or []),
         cwd=REPO / 'rust', check=True, capture_output=True, text=True).stdout)
     packages = {p['id']: p for p in meta['packages']}
     nodes = {n['id']: n for n in meta['resolve']['nodes']}
-    roots = [p['id'] for p in meta['packages'] if p['name'] in SHIPPED and p['id'] in meta['workspace_members']]
+    roots = [p['id'] for p in meta['packages'] if (manifest or p['name'] in SHIPPED) and p['id'] in meta['workspace_members']]
     seen, todo = set(), list(roots)
     while todo:
         pid = todo.pop()
@@ -107,9 +108,17 @@ def section(p, printed):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', type=Path, default=REPO / 'build/package/THIRD-PARTY-NOTICES.txt')
+    ap.add_argument('--include-rage-cli', action='store_true', help='also notices for the separately shipped authoring CLI')
     args = ap.parse_args()
     printed = {}
-    crates = sorted((p for p in graph() if p['name'] not in OURS | MASHUP), key=lambda p: (p['name'], p['version']))
+    packages = graph()
+    if args.include_rage_cli:
+        extra = []
+        for crate, directory in [('rpf-archive', 'rpf-archive-rs'), ('rage-formats', 'rage-formats'), ('rage-render', 'rage-render')]:
+            extra += ['--config', f"patch.crates-io.{crate}.path='{(REPO/'upstream'/directory).as_posix()}'"]
+        packages += graph(REPO/'upstream/rage-cli/Cargo.toml', extra)
+    distinct = {(p['name'], p['version']): p for p in packages if p['name'] not in OURS | MASHUP}
+    crates = sorted(distinct.values(), key=lambda p: (p['name'], p['version']))
     text = HEADER + '\n' + ('\n\n' + '=' * 78 + '\n\n').join(section(p, printed) for p in crates) + '\n'
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(text, encoding='utf-8', newline='\n')

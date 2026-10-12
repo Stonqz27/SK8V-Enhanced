@@ -64,6 +64,24 @@ The helper reads owned Enhanced resources and writes only under the ignored `loc
 
 ## Player setup
 
-Legacy `tools/prepare.py` and release-packaging scripts remain upstream reference, not a complete Enhanced setup flow. The tested installation uses freshly converted Skate assets, Enhanced skeletons/clip/board DLC, host/runtime and graphics integration. See the [installation contract](docs/INSTALLATION.md).
+Legacy `tools/prepare.py` and `tools/build-release.py` remain upstream reference. The Enhanced release uses `tools/enhanced_setup.py`; see [player setup](docs/PLAYER-SETUP.md) and the [installation contract](docs/INSTALLATION.md).
 
-A portable installer is separate work. Do not distribute a maintainer's converted assets, full update archive, private capture or absolute-path INI.
+## Packaging an Enhanced release
+
+Build the host, runtime, decoder, `live_clip` and authoring CLI, the patched
+ReShade runtime, and the Enhanced asset helper first. Use Rust source-path
+remapping before compiling binaries for distribution (the existing
+`tools/build-release.py` documents its `remap_config` helper). Then run:
+
+```powershell
+python tools/test_enhanced_setup.py
+python tools/build-enhanced-release.py --version 1.1.8-enhanced.1-preview
+```
+
+The packager uses an allowlist and the pinned converter-tool snapshot, includes
+dependency notices and decoder source, excludes separately supplied SDK/readers
+and retail file formats, and refuses personal paths. It writes the Enhanced
+ZIP, a release manifest, file checksums and an archive SHA-256 under ignored
+`build/release/`. Commit the final source before packaging so the release
+manifest identifies the source revision. Never package a maintainer's converted
+assets, update archive, memory capture or absolute-path INI.
