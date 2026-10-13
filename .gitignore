@@ -37,6 +37,7 @@ skate-data/
 *.dmp
 *.png
 !tools/board-wheel-icon.png
+!docs/setup-wizard.png
 *.jpg
 *.mp4
 

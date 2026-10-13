@@ -14,7 +14,7 @@ import zipfile
 
 from _common import REPO, sha256_file
 
-TOOLS = ('enhanced_setup.py', 'enhanced-setup.ps1', 'get-python.ps1', 'setup_engine.py', '_common.py',
+TOOLS = ('enhanced_setup.py', 'enhanced-setup.ps1', 'enhanced-wizard.ps1', 'get-python.ps1', 'setup_engine.py', '_common.py',
          'xiso.py', 'convert-skate-data.py', 'prepare-board.py', 'prepare-board-native.py',
          'prepare-skate-audio.py', 'prepare-audio-tuning.py', 'prepare-hom-hud.py', 'prepare-hom-xray.py',
          'build-board-weapon.py', 'SkateVLegacy.ini.template', 'SkateVEnhanced.ReShade.ini')
@@ -68,6 +68,8 @@ def main():
         copy(REPO/source, root/'tools/bin'/name)
     for name in TOOLS:
         copy(REPO/'tools'/name, root/'tools'/name)
+    for name in ('SpaceGrotesk-Regular.ttf', 'SpaceGrotesk-Bold.ttf', 'OFL.txt', 'README.md'):
+        copy(REPO/'tools/setup-ui'/name, root/'tools/setup-ui'/name)
     helper = REPO/'tools/enhanced-assets/bin/Release/net9.0'
     for name in ('EnhancedAssets.dll', 'EnhancedAssets.deps.json', 'EnhancedAssets.runtimeconfig.json'):
         copy(helper/name, root/'tools/enhanced-helper'/name)
@@ -80,7 +82,11 @@ def main():
         if source.is_file() and not any(part in ('target', '__pycache__') for part in source.parts):
             copy(source, root/'source/skate-xma'/source.relative_to(REPO/'rust/skate-xma'))
     copy(REPO/'rust/Cargo.lock', root/'source/Cargo.lock')
-    (root/'SK8V Enhanced Setup.cmd').write_text('@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\\enhanced-setup.ps1" %*\r\npause\r\n', encoding='ascii')
+    (root/'SK8V Enhanced Setup.cmd').write_text(
+        '@echo off\r\nif "%~1"=="" goto wizard\r\n'
+        'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\\enhanced-setup.ps1" %*\r\n'
+        'set "setupCode=%errorlevel%"\r\npause\r\nexit /b %setupCode%\r\n:wizard\r\n'
+        'start "" powershell -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0tools\\enhanced-setup.ps1"\r\n', encoding='ascii')
     # Reuse upstream's carefully scoped converter-tool snapshot, not its Legacy installer.
     spec = importlib.util.spec_from_file_location('legacy_package', REPO/'tools/build-release.py')
     legacy = importlib.util.module_from_spec(spec)

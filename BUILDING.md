@@ -75,7 +75,8 @@ remapping before compiling binaries for distribution (the existing
 
 ```powershell
 python tools/test_enhanced_setup.py
-python tools/build-enhanced-release.py --version 1.1.8-enhanced.1-preview
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File tools/enhanced-wizard.ps1 -SelfTest -RenderDirectory build/wizard-preview
+python tools/build-enhanced-release.py --version 1.1.8-enhanced.2-preview
 ```
 
 The packager uses an allowlist and the pinned converter-tool snapshot, includes

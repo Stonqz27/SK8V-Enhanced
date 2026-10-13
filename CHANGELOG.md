@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.8-enhanced.2-preview wizard, 2026-10-13
+
+- Add a black-and-white native Windows setup wizard with bundled, privately loaded Space Grotesk typography and original board line art.
+- Add game/disc/CodeWalker browsing, stance selection, review, real stage progress, completion and retry screens.
+- Preserve full setup output and tracebacks in persistent logs, with details and open-log controls.
+- Reuse owned-asset preparation, transactional backups, graphics replacement consent and guarded restoration; add restore access in the wizard.
+- Preserve command-line setup. Gameplay binaries and the earlier installer release remain unchanged.
+- Check native screen renders, custom font loading, worker argument quoting/Unicode, progress/error/success states and packaged preflight rejection; retain all eight installer rollback regression checks.
+
 ## 1.1.8-enhanced.1-preview packaging, 2026-10-11
 
 - Publish an asset-free binary prerelease with compiled Enhanced host/runtime, HUD bridge, patched ReShade and preparation tools.

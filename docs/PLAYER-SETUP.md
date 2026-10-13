@@ -1,6 +1,6 @@
 # Install SK8V Enhanced
 
-Download the **SK8V-Enhanced-1.1.8-enhanced.1-preview.zip** asset from
+Download the **SK8V-Enhanced-1.1.8-enhanced.2-preview.zip** asset from
 [Releases](https://github.com/Stonqz27/SK8V-Enhanced/releases), not GitHub's automatic Source code ZIP.
 
 This is an experimental community release based on Hoppi/becaring SK8V 1.1.8.
@@ -49,16 +49,22 @@ mods. Close GTA completely before setup. Move other skate ASIs such as
 1. Extract the **whole ZIP** to a short, permanent path such as
    `C:\Mods\SK8V-Enhanced`. Do not run it inside the ZIP. Keep this folder afterward:
    GTA reads the converted assets from it.
-2. Run **SK8V Enhanced Setup.cmd**. If you need write access to a protected GTA
+2. Run **SK8V Enhanced Setup.cmd** to open the black-and-white setup wizard.
+   Its Space Grotesk font is bundled and loaded privately; no font installation.
+   If you need write access to a protected GTA
    directory, use Run as administrator. Setup does not automatically elevate.
-3. Enter the folder containing `GTA5_Enhanced.exe`, your own Skate 3 ISO/extracted
-   disc folder, and the CodeWalker dependency folder when prompted.
-4. Let preparation finish. It extracts and converts your Skate assets, audio
+3. Browse to the folder containing `GTA5_Enhanced.exe`, your own Skate 3 ISO/extracted
+   disc folder, and the CodeWalker dependency folder. Choose Regular or Goofy,
+   then press **Continue**.
+4. Review the paths and portable Python download choice. If existing graphics
+   files are found, explicitly choose whether to back up and replace them.
+   Press **Install**. Let preparation finish. It extracts and converts your Skate assets, audio
    and HUD, reads Enhanced ped skeletons, and creates a native Enhanced board/
    weapon DLC. Completed stages are reused when you rerun the same setup.
-5. Review the install prompt and type **YES**. If `dxgi.dll`, `ReShade.ini` or
-   the HUD addon already exists, setup separately asks before replacing those
-   graphics files. It saves backups. This release uses an unofficial patched
+5. The wizard shows real preparation stages, elapsed time and completion.
+   Progress is based on completed stages, not bytes or a time estimate. **Show details**
+   displays console output; **Open log** opens the full saved log. Press **Finish**
+   when installation succeeds. This release uses an unofficial patched
    ReShade 6.8.0 for the Skate HUD; existing graphics configurations need review
    before replacement.
 6. Launch **Story Mode** with BattlEye disabled. Initial background preparation
@@ -108,6 +114,8 @@ python tools/enhanced_setup.py --gta "D:\Games\GTA V Enhanced" --restore
 ```
 
 Or use `SK8V Enhanced Setup.cmd --gta "D:\Games\GTA V Enhanced" --restore`.
+The wizard also has **Restore a previous install** on its first page: select
+the GTA folder, click the link and review its restore confirmation.
 Restoration keeps converted data and retires the current files into the backup
 folder. It refuses to overwrite immutable files changed by another mod after
 installation. In that case, merge manually from the recorded backup.
@@ -128,7 +136,10 @@ installation. In that case, merge manually from the recorded backup.
 - **Preparation interrupted:** rerun setup with the same inputs. Incomplete
   stages are retained separately and rebuilt. If installation itself was
   interrupted, run `--restore` first.
-- **Logs:** `%LOCALAPPDATA%\SkateV\SkateVLegacy.log` and `SkateVRuntime.log`.
+- **Setup logs:** `<extracted release>\local\setup-logs\setup-*.log` contains
+  full setup output, including stderr and the final traceback. Open it from
+  the wizard. Completed preparation stages can be reused by **Try again**.
+- **Gameplay logs:** `%LOCALAPPDATA%\SkateV\SkateVLegacy.log` and `SkateVRuntime.log`.
   Include your exact game version, GPU, setup error and reproduction steps in
   [an issue](https://github.com/Stonqz27/SK8V-Enhanced/issues). Do not attach
   game dumps, keys or extracted assets.

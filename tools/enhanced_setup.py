@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 
 from _common import REPO, sha256_file
@@ -27,6 +28,19 @@ FORCED = dict(Runtime='1', PosePed='1', BoardNative='1', DrawSkater='0', LiveCli
 INSTALL_FILES = {'SkateVEnhanced.asi', 'SkateVRuntime.dll', 'SK8VHudBridge.addon64', 'dxgi.dll',
                  'ReShade.ini', 'SkateVLegacy.ini', 'mods/update/update.rpf',
                  'mods/update/x64/dlcpacks/skatev/dlc.rpf'}
+EVENTS = False
+STAGES = {'disc': (5, 15, 'Reading your Skate 3 disc'),
+          'skate': (15, 40, 'Preparing skating animations and HUD'),
+          'audio': (40, 60, 'Preparing Skate audio'),
+          'peds': (60, 72, 'Reading GTA characters'),
+          'board': (72, 82, 'Building the Enhanced skateboard'),
+          'pack': (82, 90, 'Preparing the board and weapon pack')}
+
+
+def event(title, progress, phase='install'):
+    """Coarse stage progress, not an estimate of remaining seconds or bytes."""
+    if EVENTS:
+        print('@sk8v ' + json.dumps(dict(title=title, progress=progress, phase=phase)), flush=True)
 
 
 def read(path):
@@ -139,6 +153,8 @@ def prepare(game, skate, codewalker, stance):
         command('dotnet', helper/'EnhancedAssets.dll', '--output-root', work, *args)
 
     def step(name, function):
+        start, finish, title = STAGES[name]
+        event(title, start)
         closed()
         folder = work/name
         receipt = work/(name+'.json')
@@ -146,6 +162,7 @@ def prepare(game, skate, codewalker, stance):
             records = read(receipt)['files']
             if all(child(work, p).is_file() and sha256_file(child(work, p)) == h for p, h in records.items()):
                 print('Already prepared:', name, flush=True)
+                event(title + ' - cached', finish)
                 return folder
         if folder.exists():
             folder.rename(work/(name+'.incomplete-'+uuid.uuid4().hex[:8]))
@@ -153,6 +170,7 @@ def prepare(game, skate, codewalker, stance):
         print('Preparing:', name, flush=True)
         files = function(folder)
         write(receipt, {'files': {str(p.relative_to(work)): sha256_file(p) for p in files}})
+        event(title + ' - complete', finish)
         return folder
 
     def disc_stage(folder):
@@ -230,6 +248,7 @@ def settings(values, old=''):
 
 
 def restore(game):
+    event('Checking the previous installation', 5, 'restore')
     closed()
     game = Path(game).resolve()
     path = game/MANIFEST
@@ -250,6 +269,7 @@ def restore(game):
     retired = child(game, saved['backup_dir']+'/retired')
     retired.mkdir(exist_ok=True)
     for index, record in reversed(list(enumerate(saved['files']))):
+        event('Restoring ' + record['target'], 10 + int(85*(len(saved['files'])-index)/max(1, len(saved['files']))), 'restore')
         target = child(game, record['target'])
         if target.is_file():
             shutil.copy2(target, retired/f'{index}-{target.name}')
@@ -266,6 +286,7 @@ def restore(game):
 
 
 def install(game, files, values, version, allow_graphics=False):
+    event('Checking installation targets and backups', 96)
     game = preflight(game)
     manifest = game/MANIFEST
     if manifest.exists():
@@ -308,7 +329,8 @@ def install(game, files, values, version, allow_graphics=False):
     saved = dict(schema=1, game=str(game), version=version, state='installing', backup_dir=backup_rel, files=records)
     write(manifest, saved)
     try:
-        for record in records:
+        for index, record in enumerate(records):
+            event('Installing ' + record['target'], 97 + int(2*index/max(1, len(records))))
             closed()
             target = child(game, record['target'])
             require((sha256_file(target) if target.is_file() else None) == record['previous'],
@@ -346,7 +368,10 @@ def main():
     parser.add_argument('--preflight', action='store_true')
     parser.add_argument('--restore', action='store_true')
     parser.add_argument('--allow-graphics-replacement', action='store_true')
+    parser.add_argument('--events', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    global EVENTS
+    EVENTS = args.events
     guided = not any((args.gta, args.skate, args.codewalker, args.restore, args.preflight))
     if guided:
         print('SK8V Enhanced setup. Close GTA. Read START-HERE.md for dependencies.')
@@ -356,17 +381,22 @@ def main():
     require(args.gta, '--gta is required.')
     if args.restore:
         restore(args.gta)
+        event('Previous files restored', 100, 'complete')
         return
+    event('Verifying the release', 0)
     package = verify_package()
+    event('Checking GTA Enhanced and dependencies', 2)
     game = preflight(args.gta)
     if args.preflight:
         print('Enhanced version, dependencies and release checksums passed. GTA unchanged.')
+        event('Checks passed; GTA unchanged', 100, 'complete')
         return
     require(args.skate and args.codewalker, '--skate and --codewalker are required.')
     work, pack, data, asset = prepare(game, args.skate, args.codewalker, args.stance)
     if args.prepare_only:
         write(work/'prepared.json', dict(pack=str(pack), settings=data))
         print('Assets prepared; GTA unchanged.')
+        event('Assets prepared; GTA unchanged', 100, 'complete')
         return
     source = game/'mods/update/update.rpf'
     if not source.is_file():
@@ -376,7 +406,9 @@ def main():
             'Not enough space in the setup folder to stage the modded update archive.')
     folder = work/('update-'+uuid.uuid4().hex[:8])
     folder.mkdir()
+    event('Preserving the GTA DLC list', 90)
     asset('stage-update', game, folder/'update.rpf')
+    event('DLC archive checked', 96)
     files = {name: PAYLOAD/name for name in ('SkateVEnhanced.asi', 'SkateVRuntime.dll', 'SK8VHudBridge.addon64', 'dxgi.dll')}
     files.update({'ReShade.ini': REPO/'tools/SkateVEnhanced.ReShade.ini',
                   'mods/update/update.rpf': folder/'update.rpf',
@@ -389,11 +421,14 @@ def main():
         require(prompted('Install prepared mod? Type YES') == 'YES', 'Installation cancelled; assets retained.')
     install(game, files, data, package['version'], args.allow_graphics_replacement)
     print('Launch Story Mode with BattlEye disabled. Select Skateboard in the melee wheel; Y mounts/dismounts.')
+    event('Ready to skate', 100, 'complete')
 
 
 if __name__ == '__main__':
     try:
         main()
     except Exception as error:
+        traceback.print_exc()
         print('Setup stopped:', error, file=sys.stderr)
+        event(str(error), 0, 'error')
         sys.exit(2)

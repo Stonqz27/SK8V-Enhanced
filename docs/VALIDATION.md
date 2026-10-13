@@ -2,6 +2,26 @@
 
 Target: Enhanced **1.0.1158.16**, Windows x64; current upstream SK8V **1.1.8 / 9fbef44**.
 
+## Setup wizard checks (2026-10-13)
+
+The `1.1.8-enhanced.2-preview` installer adds the native monochrome wizard.
+All four gameplay/graphics payload hashes match the first installer release.
+
+- Rendered and inspected the actual WinForms source, review, progress, completion
+  and error screens, with the bundled Space Grotesk font privately loaded.
+- Exercised the worker output queue, stderr capture, exit code, JSON stage
+  messages, retry and completion states. Paths with spaces, quotes, ampersands,
+  trailing backslashes and Unicode passed through without shell interpretation.
+- Relocated the packaged release into a path containing spaces, an ampersand
+  and Unicode; both wizard rendering and the console entry point worked.
+- The packaged wizard surfaced a real preflight rejection against a fake game
+  directory (or the running-game guard) and saved the full error. It did not
+  install or prepare retail data during this check.
+- All eight backup/restore installation regressions still passed.
+
+These checks cover the new interface and its worker boundary. The complete
+fresh-PC disc conversion and live installation flow still needs wider testing.
+
 ## Experimental binary release checks (2026-10-11)
 
 The `1.1.8-enhanced.1-preview` download includes the matching Enhanced host/

@@ -14,7 +14,9 @@ Maintained by **[Stonqz27](https://github.com/Stonqz27)**. Based on [SK8V 1.1.8]
 
 **1.1.8 source update; new live play test pending.** The previous 1.0.9-based Enhanced checkpoint was playable on the tested installation. On October 10, 2026, the maintainer reported that the full skating test stayed stable. Separate live checks passed for animation jobs, native board/weapon loading, Direct3D 12 presentation and GTA audio streams. A headless test exercised the actual Skate runtime, board, poses, camera, scoring HUD and audio together.
 
-An **experimental installable prerelease** is available from [Releases](https://github.com/Stonqz27/SK8V-Enhanced/releases/tag/1.1.8-enhanced.1-preview). Download the named Enhanced ZIP, extract it to a permanent folder, and run **SK8V Enhanced Setup.cmd**. It prepares assets from your own Skate 3 disc and installed Enhanced game, with backups and restoration. Read [the player setup guide](docs/PLAYER-SETUP.md) for dependencies and steps. The 1.1.8 build and new first-run setup still need wider live testing. The upstream Legacy wizard is not an Enhanced installer.
+An **experimental installable prerelease** is available from [Releases](https://github.com/Stonqz27/SK8V-Enhanced/releases/tag/1.1.8-enhanced.2-preview). Download the named Enhanced ZIP, extract it to a permanent folder, and run **SK8V Enhanced Setup.cmd**. A black-and-white native wizard guides you through paths, stance, installation and restoration, with real stage progress and saved error logs. It prepares assets from your own Skate 3 disc and installed Enhanced game, with backups and restoration. Read [the player setup guide](docs/PLAYER-SETUP.md) for dependencies and steps. The 1.1.8 build and new first-run setup still need wider live testing. The upstream Legacy wizard is not an Enhanced installer.
+
+![Native monochrome Enhanced setup wizard](docs/setup-wizard.png)
 
 ## Upstream 1.1.8 update
 

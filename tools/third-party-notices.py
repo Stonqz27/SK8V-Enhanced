@@ -58,6 +58,13 @@ RAGE formats (Unlicense)
 rage-formats, rpf-archive-rs, rage-cli, by VIRUXE, released into the public domain.
   https://github.com/VIRUXE
 
+Enhanced setup typography (SIL Open Font License 1.1)
+---------------------------------------------------
+Space Grotesk Regular and Bold, by Florian Karsten.
+  https://github.com/floriankarsten/space-grotesk
+  Unmodified static font files in tools/setup-ui; the full license accompanies
+  them in tools/setup-ui/OFL.txt. Loaded privately, not installed system-wide.
+
 Rust crates
 -----------
 Each crate below is linked into a shipped binary and is distributed under its
